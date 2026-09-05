@@ -244,6 +244,47 @@ uprd *args:
 uprds *args:
     scripts/uprds.sh {{args}}
 
+# scripts/stack.sh passthrough: `just stack start MIP-0005 2 site-build`, `just stack pr`,
+# `just stack restack`, `just stack status` — the local, script-only view of a MIP stack.
+stack *args:
+    scripts/stack.sh {{args}}
+
+# GitHub's native Stacks (the "Preview stack" box on a PR) via the official `gh stack` extension.
+# One-time: needs a gh login; installs the extension and its agent skill (`gh skill install
+# github/gh-stack`). Both live under ~/.local/share/gh, not in the flake — gh extensions are per-user.
+stack-setup:
+    gh auth status >/dev/null 2>&1 || { echo "gh is not logged in — run: gh auth login" >&2; exit 1; }
+    gh extension list | grep -q 'github/gh-stack' || gh extension install github/gh-stack
+    gh skill install github/gh-stack || echo "gh skill install failed (older gh?) — the extension works without the skill"
+
+# Link a MIP's *open* PRs into one GitHub Stack, bottom to top (`scripts/stack.sh link`): merged
+# and closed PRs are skipped, missing PRs are created on the right base, wrong bases are fixed.
+# Safe to re-run; additive only. `just stack-link MIP-0005` — `just uprds` does this too.
+stack-link mip="":
+    scripts/stack.sh link {{mip}}
+
+# The stack as GitHub sees it (PR numbers, states, bases). `just stack status MIP-0005` is the local view.
+stack-view *args:
+    gh stack view {{args}}
+
+# After a bottom PR was squash-merged: adopt the stack from GitHub if it isn't tracked locally
+# yet (`gh stack link` stores no local state), then fetch, rebase every remaining branch and
+# force-push with lease — the whole-stack version of `scripts/stack.sh restack`. Interactive on
+# conflicts (`gh stack rebase`). `just stack-sync MIP-0005`.
+stack-sync mip="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bottom="$(scripts/stack.sh branches {{mip}} | head -1)"
+    gh stack checkout "$bottom"
+    gh stack sync
+
+# Merge a whole stack (or everything up to one PR) in a single all-or-nothing operation — no
+# restack between merges. `just stack-merge 23 --squash` (stack number, purely remote) or
+# `just stack-merge 20 --squash` (up to and including PR #20); no argument = the locally tracked
+# stack, interactive picker. Branch protection still applies; nothing is bypassed.
+stack-merge *args:
+    gh stack merge {{args}}
+
 # ---------------------------------------------------------------------
 # Claude Code cost accounting — AGENTS.md "Attribution and cost accounting"
 # ---------------------------------------------------------------------
