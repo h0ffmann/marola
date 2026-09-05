@@ -1,0 +1,83 @@
+package marola.sightings
+
+import kyo.*
+import com.azure.cosmos.{CosmosClientBuilder, CosmosContainer}
+import com.azure.cosmos.models.{
+  CosmosItemRequestOptions,
+  CosmosQueryRequestOptions,
+  PartitionKey,
+  SqlQuerySpec,
+  SqlParameter
+}
+import java.time.Instant
+import java.util.UUID
+import scala.jdk.CollectionConverters.*
+
+/**
+ * Optional `SightingStore` backend for an actually-provisioned, shared Cosmos DB container — needed
+ * once the Telegram bot exists and can run as a shared, always-on service (a
+ * `LocalFileSightingStore` file only makes sense for one process on one host). Partitioned by
+ * `beach_name`, matching every query this module runs (`recentFor` always filters by beach).
+ *
+ * Items are passed as plain `java.util.Map[String, Object]`, not a typed POJO — Cosmos's Java SDK
+ * serializes via Jackson reflection on annotated fields by default, and a plain `Map` sidesteps
+ * that without pulling Jackson bindings into `Sighting` itself, consistent with this module's "no
+ * JSON library dependency" stance elsewhere (`json/Json.scala`'s own doc comment).
+ *
+ * API surface (`CosmosClientBuilder().endpoint(..).key(..).buildClient()`,
+ * `client.getDatabase(..).getContainer(..)`, `container.createItem(item, PartitionKey, options)`,
+ * `container.queryItems(SqlQuerySpec, CosmosQueryRequestOptions, Class)`) confirmed by inspecting a
+ * real `com.azure:azure-cosmos:4.71.0` jar's class files — not exercised against a live Cosmos DB
+ * account (none provisioned; see `AGENTS.md`'s cost-safety rule).
+ */
+final class CosmosDbSightingStore(
+    endpoint: String,
+    key: String,
+    databaseId: String,
+    containerId: String
+) extends SightingStore:
+
+  private lazy val container: CosmosContainer =
+    val client = CosmosClientBuilder().endpoint(endpoint).key(key).buildClient()
+    client.getDatabase(databaseId).getContainer(containerId)
+
+  def record(sighting: Sighting): Unit < Sync =
+    Sync.defer {
+      val item = new java.util.HashMap[String, Object]()
+      item.put("id", UUID.randomUUID().toString)
+      item.put("beach_name", sighting.beachName)
+      item.put("kind", sighting.kind.toString)
+      item.put("note", sighting.note.orNull)
+      item.put("reported_at", sighting.reportedAt.toString)
+      container.createItem(item, PartitionKey(sighting.beachName), CosmosItemRequestOptions())
+      ()
+    }
+
+  def recentFor(beachName: String, limit: Int): List[Sighting] < Sync =
+    Sync.defer {
+      val query = SqlQuerySpec(
+        "SELECT TOP @limit * FROM c WHERE c.beach_name = @beachName ORDER BY c.reported_at DESC",
+        List(SqlParameter("@limit", limit), SqlParameter("@beachName", beachName)).asJava
+      )
+      val options = CosmosQueryRequestOptions().setPartitionKey(PartitionKey(beachName))
+      container
+        .queryItems(query, options, classOf[java.util.Map[String, Object]])
+        .iterator()
+        .asScala
+        .flatMap(CosmosDbSightingStore.fromItem)
+        .toList
+    }
+
+object CosmosDbSightingStore:
+  private def fromItem(item: java.util.Map[String, Object]): Option[Sighting] =
+    for
+      beachName <- Option(item.get("beach_name")).map(_.toString)
+      kindStr <- Option(item.get("kind")).map(_.toString)
+      kind <- SightingKind.values.find(_.toString == kindStr)
+      reportedAtStr <- Option(item.get("reported_at")).map(_.toString)
+    yield Sighting(
+      beachName,
+      kind,
+      Option(item.get("note")).map(_.toString),
+      Instant.parse(reportedAtStr)
+    )

@@ -1,0 +1,104 @@
+{
+  description = "marola dev shell — Scala 3.9 / Kyo / Azure tooling, plus Python for the offline DSPy compile step; works on plain Ubuntu (not NixOS-specific)";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+    ai-jail = {
+      url = "github:akitaonrails/ai-jail";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, nixpkgs, flake-utils, ai-jail }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs { inherit system; };
+        jdk = pkgs.jdk25;
+        # nixpkgs' `sbt` package is a wrapper script that hardcodes its own
+        # JAVA_HOME at build time, pointing at whatever JRE nixpkgs built it
+        # against (currently older than 25) — just having jdk25 on PATH
+        # alongside it does NOT change what sbt's wrapper uses internally.
+        # `.override { jre = ... }` is the standard nixpkgs pattern for
+        # controlling this on JVM-tool derivations (sbt, gradle, maven,
+        # ant, ...). If this override argument name has changed, run
+        # `cat $(readlink -f $(command -v sbt))` after `nix develop` to see
+        # what JAVA_HOME the wrapper actually hardcodes, and adjust.
+        sbtOnJdk25 = pkgs.sbt.override { jre = jdk; };
+      in
+      {
+        devShells.default = pkgs.mkShell {
+          name = "marola";
+
+          buildInputs = [
+            jdk
+            sbtOnJdk25
+            pkgs.scala-cli
+            pkgs.coursier
+
+            # Task runner
+            pkgs.just
+
+            # marola's offline DSPy compile step (Python-only — DSPy has
+            # no JVM port, see docs/ARCHITECTURE.md and
+            # dspy/README.md). `python3 -m venv` + pip installs
+            # DSPy itself; not vendored as a nixpkgs package here since it
+            # moves fast and pins its own dependency versions.
+            pkgs.python3
+            pkgs.python3Packages.pip
+
+            # marola's default local LLM/vision backend (LocalLlmClient,
+            # LocalVisionClient, and the DSPy compile step's default
+            # MAROLA_DSPY_MODEL) — this is what lets marola run with zero
+            # Azure account. Confirmed present in nixpkgs (`ollama-0.32.14`
+            # at the time this was added). `ollama serve` still needs to be
+            # started separately (see the shellHook note and
+            # docs/RUN-LOCALLY.md) — this only puts the binary on PATH.
+            pkgs.ollama
+
+            # Azure CLI (well-established nixpkgs package)
+            pkgs.azure-cli
+
+            # GitHub
+            pkgs.gh
+
+            # General
+            pkgs.jq
+            pkgs.git
+
+            # ai-jail — sandboxes AI coding agents (Claude Code, ...)
+            # behind bubblewrap/Landlock/seccomp on Linux. Not a substitute
+            # for the AGENTS.md cost/deploy rules, but a real containment
+            # layer for whatever an agent runs locally. See `just jail-*`
+            # and `.ai-jail` (project-level policy, committed) below.
+            ai-jail.packages.${system}.default
+            pkgs.bubblewrap
+          ];
+
+          # Backup for anything else (coursier, plain `java`, scala-cli) that
+          # respects JAVA_HOME directly rather than going through sbt's wrapper.
+          JAVA_HOME = "${jdk}";
+
+          # ai-jail's own flake sets this in its own devShell; it doesn't
+          # propagate automatically when consumed as a package input like
+          # here, so set it explicitly rather than rely on ai-jail finding
+          # bwrap on PATH.
+          BWRAP_BIN = "${pkgs.bubblewrap}/bin/bwrap";
+
+          # NOTE: `azd` (Azure Developer CLI) is deliberately not listed
+          # above — its nixpkgs packaging status changes; if `nix develop`
+          # fails to find it and you're deploying one of marola's optional
+          # Azure integrations, install it directly:
+          #   curl -fsSL https://aka.ms/install-azd.sh | bash
+
+          shellHook = ''
+            echo "marola dev shell"
+            git config core.hooksPath .githooks 2>/dev/null || true
+            java -version
+            curl -s -m 1 http://localhost:11434/api/tags >/dev/null 2>&1 \
+              || echo "ollama not running — start it with 'ollama serve' (see docs/RUN-LOCALLY.md)"
+            echo "Run 'just' to see available commands."
+          '';
+        };
+      });
+}

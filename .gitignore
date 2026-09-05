@@ -1,0 +1,41 @@
+# sbt / Scala
+target/
+project/target/
+project/project/
+.bloop/
+.bsp/
+.metals/
+.ammonite/
+metals.sbt
+
+# Coursier / Ivy
+.ivy2/
+.coursier/
+
+# Nix
+result
+result-*
+.direnv/
+
+# Azure Developer CLI
+.azure/
+
+# Env / secrets
+.env
+*.pem
+*.key
+
+# OS / editor
+.DS_Store
+.idea/
+*.iml
+.vscode/
+
+# Logs
+*.log
+
+# sbt boot server socket dir (see justfile's XDG_RUNTIME_DIR override)
+/.tmp/
+
+# LocalFileSightingStore's default output (sightings/) — runtime data, not a build artifact
+/data/
