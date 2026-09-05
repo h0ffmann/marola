@@ -153,13 +153,26 @@ finetune-dataset:
 # proposals" — the pack's instruction section tells the assistant the rest (template, numbering,
 # transcript appendix, what not to assert).
 context-mips:
-    mkdir -p .tmp && repomix -c repomix.config.json --quiet
+    mkdir -p .tmp && "$(just _repomix)" -c repomix.config.json
     @just _clip .tmp/marola-context-mips.md
 
 # Same idea for the whole repo (code included, comments stripped) — big; for code questions only.
 context-full:
-    mkdir -p .tmp && repomix --style markdown --compress --remove-comments -o .tmp/marola-context-full.md --quiet
+    mkdir -p .tmp && "$(just _repomix)" --style markdown --compress --remove-comments -o .tmp/marola-context-full.md .
     @just _clip .tmp/marola-context-full.md
+
+# The Node repomix (nixpkgs, flake.nix) — not the unrelated PyPI "repomix" Python port, which a
+# pip/pipx install can put earlier on PATH (it prints an argparse usage and ignores our config).
+# Prefer the /nix/store one whatever the PATH order; fall back to whatever `repomix` is.
+_repomix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bin="$(command -v -a repomix 2>/dev/null | grep -m1 '^/nix/store/' || command -v repomix || true)"
+    [ -n "$bin" ] || { echo "repomix not found — enter 'nix develop' (flake.nix provides it)" >&2; exit 1; }
+    if ! "$bin" --version 2>/dev/null | grep -qE '^[0-9]+\.[0-9]+'; then
+        echo "warning: $bin does not look like the Node repomix; output may be wrong" >&2
+    fi
+    echo "$bin"
 
 _clip file:
     #!/usr/bin/env bash
@@ -174,6 +187,19 @@ _clip file:
     else
         echo "no clipboard tool/display found — open the file instead: {{file}} ($size bytes)"
     fi
+
+# ---------------------------------------------------------------------
+# Claude Code cost accounting — AGENTS.md "Attribution and cost accounting"
+# ---------------------------------------------------------------------
+
+# What Claude Code sessions consumed, from the local session logs (~/.claude/projects), priced at
+# list rates — the quota proxy to paste into a PR's "Cost" line. Uses ccusage (free, npm) via npx.
+#   just claude-cost                 # per-session table (this machine, all projects)
+#   just claude-cost daily           # per-day
+#   just claude-cost session --json  # machine-readable
+# In-session, `/usage` shows the same numbers for the current session only.
+claude-cost *args="session":
+    npx --yes ccusage@latest {{args}}
 
 # ---------------------------------------------------------------------
 # ai-jail — sandbox AI coding agents (bubblewrap/Landlock/seccomp on
