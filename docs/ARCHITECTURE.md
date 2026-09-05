@@ -48,7 +48,7 @@ Telegram wins on every axis that matters for this use case. **Decision: Telegram
 A real, runnable pipeline plus six independently pluggable local/Azure integrations — no mocks,
 no stubs pretending to be real:
 
-Four sbt modules at the repo root — `core`, `local`, `azure`, `cli` (see `FUTURE-WORK.md` §7.2 for
+Four sbt modules at the repo root — `core`, `local`, `azure`, `cli` (see `FUTURE-WORK.md` §7.3 for
 why, and the dependency-inversion fix that keeps `core` free of any Azure reference):
 
 ```
@@ -63,6 +63,12 @@ core/src/main/scala/marola/
   llm/                           §5a — LlmClient (trait), CompiledPrompt (replays a
                                   DSPy-compiled artifact), Reviewer (a second LLM pass that
                                   grades/can override the summarizer's output)
+  water/                         §5g — WaterQuality model, WaterQualityClient (trait),
+                                  WaterQualityMatcher (pure: agency points → OSM beaches)
+  conditions/Tides.scala         §5g — tide turns from Open-Meteo's hourly sea level (pure)
+  lore/SeaLore.scala             §5g — curated, sourced "did you know?" paragraph (verbatim)
+  knowledge/                     §5h — Embedder + KnowledgeStore (traits), Corpus chunker,
+                                  FileKnowledgeStore (JSON vector index), OceanQa (grounded Q&A)
   sightings/                     §5d — SightingStore (trait) + Sighting model
   vision/                        §5e — VisionClient (trait)
   http/Http.scala                java.net.http.HttpClient wrapped at the Kyo Sync boundary
@@ -76,6 +82,8 @@ local/src/main/scala/marola/     zero Azure SDK dependency — the always-availa
   llm/LocalLlmClient.scala       local Ollama chat backend
   vision/LocalVisionClient.scala local multimodal Ollama backend
   sightings/LocalFileSightingStore.scala   JSON-lines file store
+  water/ImaScWaterQualityClient.scala      §5g — IMA/SC bathing-water feed (Santa Catarina)
+  knowledge/OllamaEmbedder.scala           §5h — embeddings via Ollama's native /api/embed
 
 azure/src/main/scala/marola/     every optional Azure integration lives here, nowhere else
   llm/AzureFoundryLlmClient.scala   §5a — Azure AI Foundry
@@ -87,6 +95,7 @@ azure/src/main/scala/marola/     every optional Azure integration lives here, no
 cli/src/main/scala/marola/       depends on core + local + azure — the one place that picks
                                   a backend per integration
   Main.scala                     CLI entry point (KyoApp) — see §3.1 for its flags
+  Report.scala                   pure text rendering: ranked list, detailed block, lore, answers
   AppConfig.scala                env config + a llmClient/sightingStore/visionClient/
                                   distanceRefiner factory method per pluggable integration
                                   (each: local default, Azure opt-in, returns None if Azure
@@ -102,12 +111,20 @@ dspy/
 ### 3.1 `Main`'s CLI surface
 
 ```
-just run marola                                          # ranked list, deterministic, no LLM
-just run marola -- --lat <lat> --lon <lon>                # explicit location
-just run marola -- --summarize                            # + LLM natural-language summary (§5a)
-just run marola -- --report-sighting <jellyfish|whale> <beach> [note]   # §5d
-just run marola -- --analyze-photo <path>                  # §5e
+just run                                          # ranked list + detailed block + lore, no LLM
+just run -- --lat <lat> --lon <lon>                # explicit location (else env vars, else IP — §3.1)
+just run -- --summarize                            # + LLM natural-language summary (§5a)
+just run -- --report-sighting <jellyfish|whale|pollution> <beach> [note]   # §5d
+just run -- --analyze-photo <path>                  # §5e
+just run -- --brief                                 # the pre-MIP-0001 one-line list, no block/lore
+just run -- --ask "<question>"                      # §5h — grounded Q&A over knowledge/ (just ask ...)
+just run -- --reindex                               # §5h — re-embed knowledge/ (just knowledge-index)
 ```
+
+Since MIP-0001 the default output is the ranked list with a **water-quality column**, a
+**detailed block** for the top pick (per-point water quality, waves/period/swell, tide turns,
+air, jellyfish, whales), the summary/review if `--summarize`, and one **sea-lore paragraph**
+(`MAROLA_SEA_LORE=off` or `--no-lore` to drop it). See `RUN-LOCALLY.md` §4 for a real run.
 
 Sample output against live data:
 
@@ -162,9 +179,8 @@ flowchart TD
 entry point to the hardcoded pipeline above — not shown in the diagram since it's a parallel access
 path, not a stage in this one.
 
-  Telemetry (§5f) wraps the pipeline in an OpenTelemetry span when configured — cross-cutting,
-  not shown as a pipeline stage.
-```
+Telemetry (§5f) wraps the pipeline in an OpenTelemetry span when configured — cross-cutting,
+not shown as a pipeline stage.
 
 Cross-cutting: rate limiting (per Telegram user ID) and a cost-governor check before any paid call,
 built early, not bolted on.
@@ -184,6 +200,8 @@ configured (so `Main` can fail gracefully with a clear message rather than a sta
 | 5d | Sighting reports | JSON-lines file | Cosmos DB container | `MAROLA_SIGHTING_STORE_PROVIDER=azure` |
 | 5e | Photo analysis | Multimodal Ollama model (`llava`) | Azure AI Vision Image Analysis | `MAROLA_VISION_PROVIDER=azure` |
 | 5f | Observability | Off (no-op) | Application Insights via OpenTelemetry | set `APPLICATIONINSIGHTS_CONNECTION_STRING` |
+| 5g | Bathing-water quality (MIP-0001) | IMA/SC feed, auto-selected when the origin is in Santa Catarina; `none` elsewhere | *(none — regional agencies, not a cloud service; see MIP-0001 §5.2)* | `MAROLA_WATER_QUALITY_PROVIDER=auto\|ima-sc\|none` |
+| 5h | Ocean knowledge Q&A — local RAG (MIP-0001, `FUTURE-WORK.md` §9.1) | `knowledge/*.md` embedded by Ollama (`llama3.2` itself by default), JSON index under `data/` | *(not built — Azure AI Search is the obvious sibling in Phase 2)* | `MAROLA_LOCAL_EMBED_MODEL`, `MAROLA_KNOWLEDGE_DIR` |
 
 ### 5a. Query synthesis — `llm/`
 
@@ -200,7 +218,7 @@ small hand-labeled trainset, using a metric that rewards mentioning jellyfish ri
 Moderate/High (weighted heavily) and whale sighting likelihood when Moderate/High (weighted lower —
 a nice-to-know, per the Signature's own instruction not to let it crowd out the jellyfish/
 conditions takeaway). `.compile(...).save(...)` produces a JSON artifact (instructions + few-shot
-demos, not weights) at `marola/src/main/resources/recommendation_prompt.json`.
+demos, not weights) at `core/src/main/resources/recommendation_prompt.json`.
 
 **`llm/CompiledPrompt.scala`** loads that JSON and turns it into a plain chat message list any
 `LlmClient` can replay — a good-faith replication of DSPy's own `ChatAdapter` format (instructions
@@ -239,7 +257,7 @@ the raw draft.
   way: `tokenizers`' Rust extension needs `libstdc++.so.6`, which a Nix-based Python environment
   doesn't put on the default linker path — fixed via `LD_LIBRARY_PATH`, documented in
   `dspy/README.md`.
-- `just run marola -- --summarize` was run against that same local Ollama model end to end: it
+- `just run -- --summarize` was run against that same local Ollama model end to end: it
   loads the real compiled JSON artifact, replays it via `LocalLlmClient`, and got back a real
   natural-language summary. One honest finding: the model mentioned a whale despite
   `whaleSightingLikelihood=Low` (midnight, outside the visibility window) even though the compiled
@@ -301,9 +319,9 @@ way:
    registration. Fixed: `META-INF/services/*` now merges via `MergeStrategy.concat` before the
    general `META-INF` discard rule.
 3. **Bug found:** with two `main` methods in the module (`Main`, `SwimConditionsMcpServer`),
-   `sbt run`/`just run marola` started prompting interactively to pick one, hanging in batch mode
+   `sbt run`/`just run` started prompting interactively to pick one, hanging in batch mode
    (`No main class detected`). Fixed: `Compile / run / mainClass` pinned to `marola.Main`; the MCP
-   server is run via `sbt marola/runMain marola.agent.SwimConditionsMcpServer` instead.
+   server is run via `sbt cli/runMain marola.agent.SwimConditionsMcpServer` (`just mcp-server`) instead.
 
 NOT verified: an actual MCP client (Claude Desktop, a Foundry agent) launching and using this
 server — that needs configuring an external client, which wasn't available to test here.
@@ -368,6 +386,66 @@ passes straight into `AzureMonitorAutoConfigure.customize`). Unverified against 
 Insights resource (none provisioned) — the no-op default path (`otel = None`) was exercised via
 every other live-tested run above, all of which had no connection string set.
 
+### 5g. Bathing-water quality, tides, and sea lore — `water/`, `conditions/Tides`, `lore/`
+
+Designed in [`mips/MIP-0001-water-quality-and-sea-lore.md`](./mips/MIP-0001-water-quality-and-sea-lore.md)
+and implemented as designed, with one addition found by test: the matcher's distance fallback
+refuses inland-water points (LAGOA/CANAL/RIO...), because Lagoa da Conceição's Ponto 72 sits
+1.3km from Praia da Joaquina's centroid and would otherwise have been attached to it.
+
+- `ImaScWaterQualityClient` (`local/`): one empty `POST` to IMA's undocumented map feed, 260 points
+  with coordinates and the last five samples, parsed tolerantly. `WaterQualityMatcher` assigns
+  points to OSM beaches by normalised name (word-prefix aware), then by distance ≤ 2.5km for
+  unmatched sea points only. `Swimability.waterVerdict` applies MIP-0001 §6: all-IMPRÓPRIA veto,
+  mixed −20 naming the spots, PRÓPRIA nothing, stale (> 45 days) nothing-but-say-so.
+- `Tides.extrema` reads high/low water off Open-Meteo's hourly `sea_level_height_msl`;
+  `OpenMeteoClient` now also fetches `wave_period`, `wave_direction`, `swell_wave_height`,
+  `swell_wave_period` for the detailed block.
+- `SeaLore.pick`: eight sourced entries in `core/src/main/resources/sea_lore.json`, filtered by
+  region/season, chosen deterministically by date × beach, appended verbatim — never through the
+  LLM. The reviewer does **not** receive the lore (deviation from MIP-0001 §5.4, deliberately:
+  the lore never enters a model, so there is nothing for the reviewer to check).
+- `SightingKind.Pollution`; MCP gains `get_water_quality` and `water_quality`/`tides` fields.
+
+**Status — verified live from Campeche on 2026-09-05:** Ponto 73 (Riozinho) shows IMPRÓPRIA with
+749 enterococci/100mL, the other four PRÓPRIA, Campeche scores −20 with the location named; tide
+turns print from the sea-level series. Unit tests: matcher, verdict rows, tides, lore, IMA parser
+on a real-feed fixture (44 tests total). Known limits: §9 (centroid distance, Overpass slowness)
+plus MIP-0001 §8 (undocumented endpoint, off-season staleness).
+
+### 5h. Ocean knowledge — local RAG, and local fine-tuning — `knowledge/`, `finetune/`
+
+`FUTURE-WORK.md` §9.1's first cut, local-only by request: **RAG first, fine-tuning as a labelled
+scaffold.**
+
+- **RAG.** `knowledge/*.md` (six documents: rip currents, jellyfish/man o' war and sting first aid,
+  bathing-water quality, whales off Santa Catarina, waves/tides/upwelling glossary, sea foam and
+  water colour — each with a `Source:` URL; see `knowledge/README.md` for their honest status) is
+  chunked by `Corpus`, embedded by `OllamaEmbedder` (`/api/embed`, `llama3.2` itself by default —
+  no extra model to pull; `nomic-embed-text` is a one-env-var upgrade), stored as a JSON vector
+  index under `data/` by `FileKnowledgeStore`, and searched by cosine. `OceanQa` has the local LLM
+  answer **only** from the top passages, citing `[n]`, and never calls the model when nothing was
+  retrieved — in `strict` mode. The default `--ask` mode is `general` (`MAROLA_ASK_FALLBACK`):
+  when no passage clears `MAROLA_ASK_MIN_SCORE` the model answers from its own knowledge with a
+  visible "(unsourced)" label rather than refusing — the corpus covers swim safety, users ask
+  about the whole ocean. Surfaces: `just ask "..."` / `--ask`, MCP `ask_ocean_question`.
+- **Benchmark.** `just benchmark` (`cli/bench/OceanBenchmark`) runs 22 ocean questions — science,
+  history, animals, nature, safety; ten inside the corpus, twelve deliberately outside — through
+  three arms on the same local model: the plain prompt, marola strict, marola general. Scores are
+  deterministic (keyword coverage, citation present, abstained, latency) and the report ends with a
+  computed verdict and what would beat the baseline where it loses (more corpus documents on the
+  topics where strict abstained; a sharper embedder). Output under `data/benchmark-*.md`; the
+  2026-09-05 baseline is kept in [`benchmarks/2026-09-05.md`](./benchmarks/2026-09-05.md): the
+  default mode beat the plain prompt 0.84 vs 0.75 overall, 0.92 vs 0.55 inside the corpus, citing
+  on 41% of answers — after adding the `NO_ANSWER_IN_PASSAGES` two-stage fallback, without which
+  `llama3.2`'s own embeddings could not tell relevant passages from irrelevant ones.
+- **Fine-tuning.** `finetune/` (README there is the honest status): Tier 1 is an Ollama
+  `Modelfile` variant `marola-llama3.2` (persona + decoding parameters, no weight change) — built
+  and run. Tier 2 is a QLoRA recipe (`build_dataset.py` → 41 chat examples from the DSPy demos,
+  sea lore and corpus; `train_lora.py` with peft/trl; `Modelfile.adapter`) — written, not run: no
+  GPU, gated base weights. Facts are deliberately *not* what the fine-tune targets — format and
+  tone are; facts stay in RAG with citations.
+
 ## 6. Azure infrastructure needed
 
 Nothing is provisioned yet — per `AGENTS.md`'s cost-safety rule, nothing gets provisioned without
@@ -382,9 +460,10 @@ your explicit go-ahead. When it's time, per integration:
 | Azure AI Vision resource | §5e | |
 | Application Insights resource | §5f | |
 | Container App (scale-to-zero) | Hosting the Telegram bot process | Only needed once running as a **webhook**; long-polling can run anywhere with outbound HTTPS, including a laptop |
-| Budget + Action Group | Cost guardrail across all of the above | Same email-alert pattern as `infra/main.bicep`, not a hard cap (see that file's own caveat) — factor shared Bicep if/when actually provisioned |
+| Budget + Action Group | Cost guardrail across all of the above | An email-alert budget, not a hard cap — write the Bicep when Phase 3 actually provisions anything |
 
-**Not needed:** Document Intelligence, Azure AI Search / RAG (no document corpus here), Event
+**Not needed yet:** Document Intelligence (IMA has a JSON feed; the PDF bulletin is only the
+fallback), Azure AI Search (the RAG corpus is local, §5h — Search is its Phase 2 sibling), Event
 Grid/Communication Services (Telegram's own Bot API replaces that whole layer — see §2).
 
 **To actually test the Telegram bot without any Azure spend**: register a bot via
@@ -466,7 +545,7 @@ Full domain-by-domain mapping lives in its own docs now, not inline here:
 
 - [`AI-103-MAPPING.md`](./AI-103-MAPPING.md) — every AI-103 skill area against what marola actually
   builds, including an honest list of remaining gaps (RAG/fine-tuning, first-class text analysis).
-- [`AI-500-MAPPING.md`](./AI-500-MAPPING.md) — AI-103's mandatory-prerequisite follow-on exam
+- [`AI-500-MAPPING.md`](./AI-500-MAPPING.md) — the follow-on exam for which AI-103 is the mandatory prerequisite
   (multi-agent solutions); a design target for where marola's summarizer/reviewer pipeline grows
   into a real multi-agent architecture, not a record of what's built yet.
 
