@@ -168,6 +168,7 @@ branches once every stacked PR shows MERGED.
 | Statement coverage (aggregated core/local/azure/cli) | `just coverage`; published to the README badge by ci.yml on pushes to `main` |
 | Live checks | `just run -- --brief`, `just e2e`; once MIP-0005 lands, `just site-build floripa && just site-serve` |
 | One PR | `scripts/stack.sh pr` (`--dry-run` prints the gh commands) |
+| gh inside the jail | `GH_TOKEN` in `.env` (fine-grained, this repo, PRs read/write) — `just jail-claude` passes it through, so the agent runs `just uprd` itself |
 | Every PR of a stack | `just uprds MIP-NNNN` |
 | PR body shape / title length | `.github/PULL_REQUEST_TEMPLATE.md`; title capped at 70 chars, cut point printed as a warning |
 | Tested row | `Tested: gates, e2e, live, ci-only — <not run, why>` trailer per commit; `just uprd` sets the ✅/⬜ glyphs, never guesses |
