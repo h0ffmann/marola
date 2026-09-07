@@ -1,10 +1,10 @@
 <h1 align="center">🌊 marola</h1>
 
-<p align="center"><b>When LLMs meet the ocean.</b><br/>
-Local-first ocean intelligence for open-water swimmers: the best hour to swim tomorrow, official
-bathing-water quality per sampling point, tides, jellyfish and whale odds, and a grounded
-"ask the ocean" — all on your own machine with a free model (Scala 3 / Kyo / Ollama), sourced or
-clearly labelled, never invented.</p>
+<p align="center"><b>marola — the ocean intelligence layer.</b><br/>
+The ocean near you: conditions, official bathing-water quality per sampling point, tides,
+jellyfish and whale odds, and a grounded "ask the ocean" — first case, the best hour tomorrow to
+swim, all on your own machine with a free model (Scala 3 / Kyo / Ollama), sourced or clearly
+labelled, never invented.</p>
 
 <p align="center">
 <a href="https://github.com/h0ffmann/marola/actions/workflows/ci.yml"><img src="https://github.com/h0ffmann/marola/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
@@ -19,7 +19,7 @@ clearly labelled, never invented.</p>
 <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
 </p>
 
-**Live map:** [h0ffmann.github.io/marola](https://h0ffmann.github.io/marola/) — every beach around
+**Live map:** [marola.dev](https://marola.dev/) — every beach around
 Florianópolis and Rio, ranked for today and tomorrow, water quality, tides and the hour slider;
 rebuilt every 3 hours and on every relevant merge to `main` ([`site.yml`](./.github/workflows/site.yml),
 [MIP-0005](./docs/mips/MIP-0005-map-and-static-site.md)). Live data decides the numbers,
