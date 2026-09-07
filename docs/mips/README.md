@@ -50,6 +50,7 @@ as an unfilled placeholder).
 | [MIP-0031](./MIP-0031-water-quality-inea-inema.md) | Water quality for Rio (INEA) and Bahia (INEMA) — PDF bulletin parsing plus a curated point-coordinate table, since neither institute publishes a JSON feed or coordinates | Partially implemented (tasks 1-4 of 6 — PRs #200, #203, `MIP-0031.tasks.md`) | 2026-09-06 | M | user value; exam coverage | do next (tasks 5-6: client wiring) | — |
 | [MIP-0032](./MIP-0032-model-strategy-benchmark-matrix.md) | The model × strategy benchmark matrix — closed API vs. open local vs. marola-RAG vs. marola-tuned on the same questions, with latency and cost columns; local rows free and gated, paid rows opt-in per run | Draft | 2026-09-06 | M | infra/dev-loop; cost/ops; exam coverage | do next (free half) / do when X lands (paid arm: human go-ahead + key) | — |
 | [MIP-0033](./MIP-0033-release-0.md) | Release 0 — the repo goes public, a self-hosted chatbot (Ollama + Cloudflare Tunnel, graceful offline state), the first Hugging Face-published model, and a new Milestones/Releases doc linking MIPs to a named release | Partially implemented (§5.2 of 6 — PR #196, #229) | 2026-09-06 | L | user value; community/outreach; infra/dev-loop | do next (§5.1, §5.3, §5.4) | — |
+| [MIP-0034](./MIP-0034-rss-feeds-and-content-syndication.md) | RSS in and RSS out — INMET's live warning feed as an expiring alert banner, a reading queue that feeds `corpus-doc` instead of the index, and marola's own Atom feed on the site | Draft | 2026-09-07 | S/M/L (per §5 item) | user value; infra/dev-loop; exam coverage | cheap win (§5.6 outbound, §5.3 reading queue); do next (§5.2 INMET alerts); park (§5.5 transcripts, §5.7b); reject (auto-ingest into `knowledge/`) | — |
 | [MIP-0037](./MIP-0037-map-pwa.md) | A PWA for marola's map — a service worker caches the app shell and the last board so a flaky-signal beach visit stays usable, offline shown honestly, not hidden (ROADMAP.md §7 K8) | Draft | 2026-09-07 | S | user value; infra/dev-loop | cheap win | — |
 | [MIP-0043](./MIP-0043-awesome-agentic-engineering-list.md) | `docs/AWESOME-AGENTIC-ENGINEERING.md` — a curated awesome-list of agentic-engineering tooling plus a human-gated candidate digest script, and a verified "top 10 repos similar to marola" section | Implemented — merged via PR #222 | 2026-09-07 | S | community/outreach; infra/dev-loop | cheap win (delivered) | — |
 | [MIP-0044](./MIP-0044-site-sections.md) | marola.dev becomes a site, not just a map — news, a markdown dev blog, generated Scala/Python API docs, a feeds page, about/contact, and a restrained support page | Draft | 2026-09-07 | XL — a page generator, a nav, a markdown pipeline, two documentation toolchains and a new CI workflow, editing five load-bearing pieces of the existing site machinery at once | user value; community/outreach; infra/dev-loop | do next (§5.1–§5.3); do when MIP-0034 lands (§5.4 feeds page); do when MIP-0033 §5.1 lands (§5.5 docs mirror); cheap win (§5.6 Scaladoc) / expensive, defer (§5.6 Python docs) | — |
@@ -57,5 +58,16 @@ as an unfilled placeholder).
 | [MIP-0046](./MIP-0046-remove-ai-slop-ui.md) | The map without the generated look — a chart-derived icon set replacing every emoji on the page | Draft | 2026-09-07 | M — three site files plus `scripts/site_check.js`, whose emoji assertions are a `just quality-other` gate and have to move in lockstep; "done" needs a browser at 390/1280 px, not only the stub harness | user value; infra/dev-loop | do next — self-contained, and it wants to land before MIP-0042 freezes today's client at `/v1/` | — |
 | [MIP-0047](./MIP-0047-desmos-equation-art.md) | Equation-drawn art — Desmos as the sketchpad, the equation as the source, static SVG as the only thing shipped (five sea motifs; no third-party script, no Desmos-exported file, no build step) | Draft | 2026-09-07 | S — one stdlib Python generator with a `--self-test`, one equations file, a generated `<symbol>` block in MIP-0046's sprite; the authoring is hours of human eye-work but not build effort | user value; infra/dev-loop | do when MIP-0046 lands | — |
 <!-- mip-graph:start -->
-_No MIP currently declares a **Blocked by** relationship, so there is nothing to graph yet — add that field to a MIP's metadata table and run `just mip-graph` again._
+```mermaid
+flowchart TD
+  classDef draft fill:#fff,stroke:#999,stroke-dasharray:3 3;
+  classDef accepted fill:#eef,stroke:#36c;
+  classDef implemented fill:#efe,stroke:#2a2;
+  classDef rejected fill:#f8f8f8,stroke:#bbb,color:#999;
+  M0034["MIP-0034"]:::draft
+  M0044["MIP-0044"]:::draft
+  M0034 --> M0044
+```
+
+_34 MIP(s) with no declared Blocked-by relationship, not graphed: MIP-0001, MIP-0002, MIP-0003, MIP-0004, MIP-0005, MIP-0006, MIP-0007, MIP-0008, MIP-0009, MIP-0010, MIP-0011, MIP-0012, MIP-0013, MIP-0014, MIP-0015, MIP-0016, MIP-0017, MIP-0018, MIP-0019, MIP-0020, MIP-0021, MIP-0022, MIP-0023, MIP-0025, MIP-0029, MIP-0030, MIP-0031, MIP-0032, MIP-0033, MIP-0037, MIP-0043, MIP-0045, MIP-0046, MIP-0047._
 <!-- mip-graph:end -->
