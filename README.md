@@ -119,6 +119,26 @@ carries the `Co-Authored-By: Claude <noreply@anthropic.com>` trailer and every P
 Full guide: [`CONTRIBUTING.md`](./CONTRIBUTING.md). Please also read the
 [Code of Conduct](./CODE_OF_CONDUCT.md) and, for a vulnerability, [`SECURITY.md`](./SECURITY.md).
 
+## Thanks
+
+marola stands on other people's work. Five it could not exist without, alphabetically:
+
+- **[Kyo](https://getkyo.io/)** — the effect system the entire Scala side is written in. Its
+  direct-style `.now`/`defer` is what lets the pipeline read like ordinary code while keeping
+  effects visible in the types.
+- **[Leaflet](https://leafletjs.com/)** — draws the map, with no account, key or tracker.
+- **[Ollama](https://ollama.com/)** — runs the models locally, which is what makes marola usable
+  with no cloud account and no API key.
+- **[Open-Meteo](https://open-meteo.com/)** — the sea temperature, wind and wave forecasts every
+  score is computed from, free and keyless.
+- **[OpenStreetMap](https://www.openstreetmap.org/copyright)** contributors — every beach, trail
+  and facility on the map is theirs, under ODbL.
+
+Also relied on daily: Scala 3, MUnit, sbt, Nix, just, DSPy, Hugging Face (`transformers`, `peft`,
+`trl`) and SmolLM2, llama.cpp, PDFBox, OpenTelemetry, MLflow, the Model Context Protocol SDK, and
+[ai-jail](https://github.com/akitaonrails/ai-jail). The map's water quality comes from bulletins
+published by INEA (Rio de Janeiro), INEMA (Bahia) and IMA/SC (Santa Catarina).
+
 ## License
 
 [MIT](./LICENSE) — © 2026 Matheus Hoffmann.
