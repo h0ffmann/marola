@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft |
+| **Status** | Accepted (tasks: `MIP-0013.tasks.md`, tasks 1-2 of 6 implemented, pending merge on `mip-0013/1-opencode-config-and-jail`) |
 | **Author** | Claude Fable 5.1, for M. Hoffmann (request of 5 Sep 2026: "a new MIP for OpenCode tryout for development, replacing Claude Code") |
 | **Created** | 2026-09-05 |
 | **Phase** | 0 — developer tooling; nothing a user of marola sees. No earlier-phase prerequisite |
@@ -298,9 +298,15 @@ None. Developer tooling.
 1. **Attribution:** how was #919 resolved — is there a config key for the co-author trailer, does
    an `AGENTS.md` instruction now shape it, or is the `opencode-git-trailers` plugin needed to get
    exactly one trailer with the required text?
-2. **Message JSON schema** in `~/.local/share/opencode/storage/message/` (token field names, model
-   id form, timestamps) — confirm on a real file before writing task 2's reader; whether the
-   SQLite `opencode.db` is the better source since v1.2.
+2. ~~**Message JSON schema**~~ — **Resolved 2026-09-07**, live: a real `opencode run --model
+   ollama/llama3.2 "..."` (opencode 1.18.25, task 1's `pkgs.opencode`) writes no
+   `storage/message/*/msg_*.json` at all — everything lives in a SQLite database at
+   `$XDG_DATA_HOME/opencode/opencode-stable.db`, table `message(id, session_id, time_created,
+   time_updated, data)`, `data` a JSON blob. An assistant message's `data` carries
+   `tokens.{total,input,output,reasoning,cache.{read,write}}`, `modelID`, `providerID`, `cost`
+   (always `0`, priced downstream — matches §4.5's own note), `time.{created,completed}`. Task 2
+   (`MIP-0013.tasks.md`) is updated with the exact mapping needed against `cost-split.py`'s
+   existing `price()` shape.
 3. **Can `llama3.2` (or `marola-llama3.2`) drive OpenCode's tool loop at all** on a marola task?
    If not, what is the smallest local model that can (`qwen`/`devstral`-class), and does it fit
    the machine?
