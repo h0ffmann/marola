@@ -70,8 +70,10 @@ quality-other:
     scripts/gh-billing.sh --self-test
     scripts/setup-cuda-cache.sh --self-test
     scripts/setup-ml-venv.sh --self-test
+    scripts/marola-sea-pull.sh --self-test
     scripts/gh-token.sh --self-test
     scripts/temps.sh --self-test
+    python3 scripts/analyze_training.py --self-test
     scripts/deps-stack.sh --self-test
     python3 scripts/lib/req_merge.py --self-test
     python3 scripts/lib/uses_merge.py --self-test
@@ -116,8 +118,9 @@ watch:
 # Ollama — marola's default local LLM backend (LocalLlmClient, docs/RUN-LOCALLY.md)
 # ---------------------------------------------------------------------
 
-# Make sure an Ollama server is reachable and has `model` pulled.
-ollama-up model=env_var_or_default("MAROLA_LOCAL_LLM_MODEL", "llama3.2") embed=env_var_or_default("MAROLA_LOCAL_EMBED_MODEL", "llama3.2"):
+# Make sure an Ollama server is reachable, starting one if not. Split out of ollama-up so
+# marola-sea-pull can require a server without also pulling ollama-up's default models.
+ollama-serve:
     #!/usr/bin/env bash
     set -euo pipefail
     api=http://localhost:11434/api/tags
@@ -131,6 +134,20 @@ ollama-up model=env_var_or_default("MAROLA_LOCAL_LLM_MODEL", "llama3.2") embed=e
         done
         curl -sf -m 2 "$api" >/dev/null || { echo "ollama: server did not come up — see .tmp/ollama.log" >&2; exit 1; }
     fi
+
+# Pull the *published* marola-sea model (the trained weights from Hugging Face) into Ollama and
+# name it `marola-sea`. Unlike finetune-model (Tier 1: persona on a stock base) and
+# Modelfile.adapter (Tier 2: an adapter needing the base locally), this is the real model the
+# publish workflow produced — standalone GGUFs, no Modelfile involved.
+#   just marola-sea-pull                 # tiny, Q4_K_M, owner from the git remote
+#   just marola-sea-pull small Q8_0      # another preset/quant
+marola-sea-pull preset="tiny" quant="Q4_K_M" owner="": ollama-serve
+    scripts/marola-sea-pull.sh {{preset}} {{quant}} {{owner}}
+
+# Make sure an Ollama server is reachable and has `model` pulled.
+ollama-up model=env_var_or_default("MAROLA_LOCAL_LLM_MODEL", "llama3.2") embed=env_var_or_default("MAROLA_LOCAL_EMBED_MODEL", "llama3.2"): ollama-serve
+    #!/usr/bin/env bash
+    set -euo pipefail
     for m in "{{model}}" "{{embed}}"; do
         if ollama list | awk 'NR>1 {print $1}' | grep -qx "$m"; then
             echo "ollama: serving, model '$m' already pulled"
@@ -498,6 +515,39 @@ gh-auth *args:
 # invented numbers. GPU readings need the host: /dev/nvidia* is not mapped into the jail.
 temps *args:
     scripts/temps.sh {{args}}
+
+# Analyse a finished training run and say what the next one should change. Reads HF Trainer's
+# trainer_state.json (both trainers set report_to=[], so there is no MLflow/W&B run to open).
+#   just analyze-training                       # the local checkpoints, both stages
+#   just analyze-training ../some/adapter       # a specific run
+# For a run that happened in CI: `just training-logs <run-id>` first, then point this at it.
+analyze-training *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{args}}" ]; then
+        python3 scripts/analyze_training.py {{args}}
+    else
+        root="${CKPT_ROOT:-../marola-checkpoints}/${PRESET:-tiny}"
+        python3 scripts/analyze_training.py "$root/adapter" "$root/dpo-adapter"
+    fi
+
+# Pull a marola-sea CI run's full logs and report down from GitHub, into .tmp/training-logs/.
+# Works for the self-hosted runner too — the artifact is uploaded to GitHub either way.
+#   just training-logs              # the most recent marola-sea publish run
+#   just training-logs 12345678     # a specific run id
+training-logs run_id="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    id="{{run_id}}"
+    if [ -z "$id" ]; then
+        id="$(gh run list --workflow "marola-sea publish" --limit 1 --json databaseId \
+              --jq '.[0].databaseId')"
+        echo "training-logs: most recent run is $id"
+    fi
+    mkdir -p .tmp/training-logs
+    gh run download "$id" --dir .tmp/training-logs
+    echo "training-logs: downloaded to .tmp/training-logs — analyse with:"
+    echo "  just analyze-training .tmp/training-logs/*/"
 
 # Claude Code in the jail;.
 jail-claude *args:
