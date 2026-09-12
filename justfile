@@ -70,7 +70,8 @@ quality-other:
     scripts/gh-billing.sh --self-test
     scripts/setup-cuda-cache.sh --self-test
     scripts/setup-ml-venv.sh --self-test
-    # scripts/setup-runners.sh --self-test  # DISABLED: script does not exist in this repo (never committed?) — flag with maintainer    scripts/marola-sea-pull.sh --self-test
+    # scripts/setup-runners.sh --self-test  # not in this repo — never committed
+    scripts/marola-sea-pull.sh --self-test
     scripts/gh-token.sh --self-test
     scripts/temps.sh --self-test
     python3 scripts/analyze_training.py --self-test
@@ -86,8 +87,10 @@ quality-other:
     python3 scripts/strip_external_scripts.py --self-test
     python3 scripts/build_docs_index.py --self-test
     python3 scripts/mip_graph.py --check
+    python3 finetune/train_lora.py --self-test
     python3 finetune/build_dataset.py --self-test
     python3 finetune/build_dpo_dataset.py --self-test
+    python3 finetune/preflight.py --self-test
     python3 finetune/merge_export.py --self-test
     .claude/hooks/guard-azure.sh --self-test
     .claude/hooks/format.sh --self-test
@@ -179,6 +182,22 @@ ask question:
 knowledge-index:
     mkdir -p "$XDG_RUNTIME_DIR" && sbt "cli/run -- --reindex"
 
+# Tier 2: a trained adapter attached to its own base, as `marola-sea-<preset>`. FROM and ADAPTER
+# come from the preset table, so switching base produces a second Ollama model rather than
+# overwriting the first.
+finetune-adapter-model preset="tiny":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    from="$(python3 -c "import sys; sys.path.insert(0, 'finetune'); from train_lora import PRESETS; print(PRESETS['{{preset}}']['ollama'])")"
+    gguf="$PWD/finetune/out/{{preset}}/adapter.gguf"
+    if [ ! -f "$gguf" ]; then
+      echo "no adapter GGUF at $gguf — train it, then convert with llama.cpp's convert_lora_to_gguf.py" >&2
+      exit 1
+    fi
+    mkdir -p .tmp
+    sed -e "s|^FROM .*|FROM $from|" -e "s|^ADAPTER .*|ADAPTER $gguf|" finetune/Modelfile.adapter > .tmp/Modelfile.adapter
+    ollama create marola-sea-{{preset}} -f .tmp/Modelfile.adapter
+
 # Tier 1: llama3.2 plus marola's persona/decoding as an Ollama model (finetune/Modelfile).
 finetune-model base="llama3.2":
     mkdir -p .tmp && sed 's/^FROM .*/FROM {{base}}/' finetune/Modelfile > .tmp/Modelfile && ollama create marola-llama3.2 -f .tmp/Modelfile
@@ -194,6 +213,10 @@ benchmark:
 # Tier 2 prep: chat-format JSONL from the DSPy demos, sea lore and knowledge/.
 finetune-dataset:
     python3 finetune/build_dataset.py
+
+# VRAM, RAM, disk and a rough ETA for a fine-tune on this machine, before starting it. MIP-0048.
+finetune-preflight preset="tiny" *args:
+    python3 finetune/preflight.py --preset {{preset}} {{args}}
 
 # Layer 3 — DPO preference pairs from Reviewer.scala's reject/revise decisions. MIP-0025 §4.3.
 finetune-dpo-dataset:
