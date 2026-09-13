@@ -10,12 +10,11 @@ identity and orientation.
 
 ## Our standards
 
-Examples of behavior that contributes to a positive environment include: demonstrating empathy,
-being respectful of differing opinions, giving and gracefully accepting constructive feedback, and
+Examples of behavior that contributes to a positive environment include: being respectful of differing opinions, giving and gracefully accepting constructive feedback, and
 focusing on what is best for the community.
 
 Examples of unacceptable behavior include: sexualized language or imagery, trolling and insulting
-comments, public or private harassment, publishing others' private information without permission,
+comments, *public* harassment, publishing others' private information without permission,
 and other conduct which could reasonably be considered inappropriate in a professional setting.
 
 ## Enforcement responsibilities and scope
