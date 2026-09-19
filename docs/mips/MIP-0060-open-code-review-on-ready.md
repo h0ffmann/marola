@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft |
+| **Status** | Draft — `Tasks: docs/mips/MIP-0060.tasks.md` |
 | **Author** | Claude (Fable 5.1), for M. Hoffmann |
 | **Created** | 2026-09-19 |
 | **Phase** | 0 (dev-loop; no user-facing surface, no Azure) |
@@ -73,7 +73,9 @@ Scala Steward PR, or a fork.
   `actions/github-script`, supports incremental re-review. Inner actions are SHA-pinned. Upstream's
   own docs say pinning the Action alone does not freeze behaviour — `ocr_version` must be pinned too.
   The demo workflow uses `pull_request_target` and `@main`.
-- **Not checked:** the JSON output schema; the agent's exact tool list (assumed read-only file/search
+- **JSON output schema: confirmed against the source at `v1.12.7`** (§11.2) — `internal/model/review.go`
+  and `cmd/opencodereview/output.go`.
+- **Not checked:** the agent's exact tool list (assumed read-only file/search
   tools — no evidence it executes repo code, but not confirmed in source); whether an MCP server can
   be configured from inside the reviewed repo (`.opencodereview/`); the benchmark numbers; whether
   the release tag `v1.12.7` (ref object `03b362a…`) is annotated — dereference before pinning.
@@ -211,8 +213,22 @@ None claimed. (AI-103 "Responsible AI" is about the product's output, not the de
 
 ## 11. Open questions
 
-1. Is `qwen2.5-coder:7b` good enough (§7.1)? If not, which local model fits the runner's GPU?
-2. OCR's JSON schema and the agent's tool list — read the source before writing `ocr-post.py`.
+1. ~~Is `qwen2.5-coder:7b` good enough (§7.1)?~~ **No — measured 2026-09-19, see the appendix:** it
+   never emits a valid tool call, so OCR produces nothing. Still open: which local model with
+   working tool calls fits the runner's GPU (RTX 4090), once Ollama's context is raised.
+2. ~~OCR's JSON schema~~ — **resolved**, confirmed against the source at `v1.12.7` (2026-09-19):
+   `internal/model/review.go` defines `LlmComment` (`path`, `content`, `suggestion_code`,
+   `existing_code`, `start_line`, `end_line`, `category` ∈ bug/security/performance/maintainability/
+   test/style/documentation/other, `severity` ∈ critical/high/medium/low) and
+   `cmd/opencodereview/output.go` the envelope `jsonOutput` (`status`, `llm{provider,model}`,
+   `message`, `summary{files_reviewed,comments,*_tokens,elapsed,budget_exceeded}`, `tool_calls`,
+   `comments`, `warnings`, `project_summary`, `session_id`, `manifest`). The posting rules come
+   from upstream's own consumer, `scripts/github-actions/post-review-comments.js`: inline-able when
+   `start_line` or `end_line` ≥ 1, multi-line as `start_line` + `line` on `side: RIGHT`, a
+   `suggestion` block only when `suggestion_code` **and** `existing_code` are both set, and
+   `event: COMMENT` on every review it creates. `scripts/ocr-post.py` reads that shape and degrades
+   to a summary-only comment on anything else, so a schema move is a quiet run, not a red check.
+   The **agent's tool list is still not checked**.
 3. `buildGoModule` vs release binary: does the locked nixpkgs carry Go ≥ 1.25.5?
 4. Should a stack (`mip-NNNN/k-*`) be reviewed bottom-first only, to save runner time?
 5. Review language: English, or Portuguese to match MIP-0054's direction?
@@ -225,4 +241,43 @@ Checked 2026-09-19: `gh api repos/alibaba/open-code-review` (licence, dates, sta
 `action.yml`, `examples/github_actions/README.md`, `pages/…/en/telemetry.md`, `go.mod`,
 `releases/latest`; marola `.github/workflows/{ci,pr-body}.yml`, `justfile` runner recipes,
 `DEV-FLOW.md` §5; `nix-config/labs/agentic/{README.md,flake.nix,scripts/jail-run}`; `ollama list` on
-the runner host. §7.1 results go here.
+the runner host.
+
+### §7.1 go/no-go — run 2026-09-19, verdict: NO-GO for `qwen2.5-coder:7b` (preliminary; the human decides)
+
+`ocr` v1.12.7 (release binary, sha256 verified before first run) inside ai-jail on a throwaway
+clone: no token, no real HOME, `--network` (see below). Endpoint
+`http://127.0.0.1:11434/v1/chat/completions` — `OCR_LLM_URL` wants the full path.
+
+| PR | Kind | Lines | Model | Wall | status | Comments | Tool calls | Tokens |
+|---|---|---|---|---|---|---|---|---|
+| #332 | Python/shell | +257 | `qwen2.5-coder:7b` | 5m52s | `failed` | **0** | **0** | 1,217,648 |
+| #332 | same | +257 | `llama3.2:latest` (fallback) | 8s | `complete` | **0** | **0** | 19,818 |
+| #333 Scala, #386 docs | — | — | not run | — | — | — | — | — |
+
+- The bar in §7.1 ("fewer than half useful") was never reached: there were **no comments to judge**.
+  `qwen2.5-coder:7b` writes the tool call as JSON text in `content` instead of `tool_calls` — 5 of 5
+  attempts at temperature 0, on `/v1` and on native `/api/chat`, reproducible on a 198-token prompt.
+  OCR logged 300 "No tool calls parsed … retrying" lines and failed every file with
+  `classification: budget`. The other two PRs were not run: the failure is content-independent.
+  **What this does not show:** that a 7B model reviews badly. Review quality and line-number
+  accuracy are both untested.
+- **Confound, host-side:** this host's Ollama (server 0.12.11; the client on PATH is 0.33.1)
+  truncates every prompt to **4096 tokens** — a ~9,000-token prompt returned
+  `prompt_eval_count: 4096`; `OLLAMA_CONTEXT_LENGTH` is unset. `llama3.2:latest` does emit real
+  `tool_calls` on upstream's probe, but its 8-second, zero-call review says little under that
+  truncation. No retest of any model here is meaningful until the context is raised. Not changed:
+  it is a service setting on the workstation.
+- Ollama accepts and ignores upstream's default `extra_body` (`{"thinking":{"type":"disabled"}}`) —
+  §4.2's "not checked" is now checked.
+- **§8's network caveat is stronger than written:** ai-jail 1.21.0 *refuses* `--allow-tcp-port`
+  ("UDP cannot be isolated"), and `--lockdown` discards `--rw-map`. Loopback-only is not merely
+  unenforced, it is unachievable today; the jail runs with unrestricted outbound network.
+- Output shape, from the real run: on failure `comments` is `null`, not `[]`, and
+  `summary.elapsed` is a string while `manifest.elapsed_ms` is the integer.
+  `scripts/fixtures/ocr/failed-run.json` is that run, untouched; `ocr-post.py` reports it as
+  "ocr failed on 4 file(s) — reached the maximum tool-request rounds without finishing".
+
+**Consequence for the stack:** task 1 (the poster) and nix-config's `ocr` + `jail-run ocr` stand on
+their own. Tasks 2–3 wait on open question 1: a local model that passes upstream's tool-call probe
+**and** a raised context, then this measurement re-run on all three PRs.
