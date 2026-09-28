@@ -84,8 +84,11 @@ projeto (uma "MIP"), para que você veja exatamente o que já está pronto e o q
 
 ## Para quem programa
 
-O marola é escrito em Scala 3 ([Kyo](https://getkyo.io/)) na JVM, com um modelo local gratuito via
-[Ollama](https://ollama.com/). A nota e o veto de segurança são Scala determinístico; o modelo
+O marola é escrito em [Scala](https://www.scala-lang.org/), uma linguagem de programação criada na
+[EPFL](https://www.epfl.ch/) (a Escola Politécnica Federal de Lausanne, na Suíça) pelo laboratório
+de Martin Odersky, e mantida hoje pelo [Scala Center](https://scala.epfl.ch/) da EPFL junto com a
+VirtusLab e a Akka (antiga Lightbend). O marola usa Scala 3 com [Kyo](https://getkyo.io/) na JVM,
+e um modelo local gratuito via [Ollama](https://ollama.com/). A nota e o veto de segurança são Scala determinístico; o modelo
 apenas interpreta e redige, e nunca derruba um veto. Para rodar em cinco minutos:
 
 ```bash
