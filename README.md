@@ -1,24 +1,19 @@
 <h1 align="center">🌊 marola</h1>
 
-<p align="center"><b>marola: the ocean intelligence layer.</b><br/>
-The ocean near you: conditions, official bathing-water quality per sampling point, tides,
-jellyfish and whale odds, and a grounded "ask the ocean": first case, the best hour tomorrow to
-swim, all on your own machine with a free model (Scala 3 / Kyo / Ollama), sourced or clearly
-labelled, never invented.<br/>
-Not a weather or surf app with a chatbot bolted on: the score and its safety veto are deterministic
-Scala, and the model is on judge duty over that: it interprets and phrases; it never overturns a
-veto. The reasoning behind that split: <a href="./PHILOSOPHY.md"><code>PHILOSOPHY.md</code></a>,
-"models reasoning over open water, with the deterministic parts kept deterministic."</p>
+<p align="center"><b>A friendly guide to the sea near you, built in the open, as citizen science.</b><br/>
+<i>Um guia amigável para o mar perto de você, feito em código aberto, como ciência cidadã.</i></p>
+
+<p align="center"><a href="./README.pt-BR.md">🇧🇷 Leia em português</a> · <a href="https://marola.dev/">🗺️ Open the live map</a></p>
 
 <p align="center">
-<a href="https://github.com/h0ffmann/marola/actions/workflows/ci.yml"><img src="https://github.com/h0ffmann/marola/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-<a href="https://github.com/h0ffmann/marola/actions/workflows/site.yml"><img src="https://github.com/h0ffmann/marola/actions/workflows/site.yml/badge.svg" alt="site (build + deploy)" /></a>
+<a href="https://github.com/marola-dev/marola/actions/workflows/ci.yml"><img src="https://github.com/marola-dev/marola/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+<a href="https://github.com/marola-dev/marola/actions/workflows/site.yml"><img src="https://github.com/marola-dev/marola/actions/workflows/site.yml/badge.svg" alt="site (build + deploy)" /></a>
 <!-- Aggregated statement coverage: ci.yml measures it (sbt-scoverage) on pushes to main and writes this shields.io endpoint JSON to Pages via the site-data branch. -->
-<a href="https://github.com/h0ffmann/marola/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fcoverage%2Flatest.json" alt="Scala statement coverage (sbt-scoverage)" /></a>
+<a href="https://github.com/marola-dev/marola/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fcoverage%2Flatest.json" alt="Scala statement coverage (sbt-scoverage)" /></a>
 <!-- The Python half, measured the only way marola tests Python: statement coverage of scripts/**/*.py while each script's own --self-test runs (there is no pytest suite). scripts/repo_stats.py, same repo-stats job and site-data branch as the badges below. -->
-<a href="https://github.com/h0ffmann/marola/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fstats%2Fpython-coverage.json" alt="Python statement coverage under the scripts' own --self-tests" /></a>
+<a href="https://github.com/marola-dev/marola/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fstats%2Fpython-coverage.json" alt="Python statement coverage under the scripts' own --self-tests" /></a>
 <!-- Same mechanism, ci.yml's repo-stats job (scripts/repo_stats.py): how many of the last main run's steps went green out of the steps that actually ran (skipped ones excluded), and cloc's code-line counts for the three Scala modules and the Python trees. -->
-<a href="https://github.com/h0ffmann/marola/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fstats%2Fci.json" alt="CI steps green on the last main run" /></a>
+<a href="https://github.com/marola-dev/marola/actions/workflows/ci.yml"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fstats%2Fci.json" alt="CI steps green on the last main run" /></a>
 <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fstats%2Fscala-loc.json" alt="Scala lines of code" />
 <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fmarola.dev%2Fstats%2Fpython-loc.json" alt="Python lines of code" />
 <a href="https://marola.dev/"><img src="https://img.shields.io/badge/live_map-marola.dev-0b6e99?logo=leaflet&logoColor=white" alt="live map" /></a>
@@ -29,15 +24,89 @@ veto. The reasoning behind that split: <a href="./PHILOSOPHY.md"><code>PHILOSOPH
 <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
 </p>
 
-**Live map:** [marola.dev](https://marola.dev/): every beach around
-Florianópolis, Rio de Janeiro and Salvador, ranked for today and tomorrow, water quality, tides
-and the hour slider;
-rebuilt every 3 hours and on every relevant merge to `main` ([`site.yml`](./.github/workflows/site.yml),
-[MIP-0005](./docs/mips/MIP-0005-map-and-static-site.md)). Live data decides the numbers,
-deterministic rules decide anything safety-related, a sourced corpus decides what the model may
-say, and a second model reviews the first. The reasoning behind each choice: [`PHILOSOPHY.md`](./PHILOSOPHY.md).
+## What is marola? (the short version)
+
+Imagine a friend who knows the sea really well. You ask *"can I swim tomorrow, and when?"*, and
+they look at the waves, the wind, the water temperature, whether the water is clean enough, the
+tide, even whether jellyfish or whales are around, and then they tell you the best hour, and
+**why**.
+
+That friend is marola. You can see it today at **[marola.dev](https://marola.dev/)**: a map of the
+beaches around Florianópolis, Rio de Janeiro and Salvador, each one ranked for today and tomorrow.
 
 <p align="center"><a href="https://marola.dev/"><img src="./docs/img/marola-web-view.png" alt="marola.dev — best hour per beach, ranked, with the water-quality popup for a sampling point" width="720" /></a></p>
+
+A few promises marola keeps:
+
+- **It never makes things up.** Every number comes from real, public data, and anything that could
+  hurt you (dirty water, rough sea) is decided by plain rules a person can read, not by an AI's
+  guess. The AI only helps explain it in words.
+- **It's free, and it runs on your own computer.** No account, no paid service needed.
+- **It says when it doesn't know.** "No data" is shown as "no data", never hidden.
+
+## Why it's open source: citizen science 🔬 / ciência cidadã
+
+**English.** marola is a **citizen-science** project. The sea belongs to everyone, and so should
+the knowledge about it. Public agencies already measure a lot (water quality, waves, weather), but
+that data is scattered, technical and hard to use at the beach. marola gathers it, checks it,
+explains it in plain language, and gives it back to the public. And the people who swim, surf,
+fish and dive every day can give something back too: what they see in the water. That's why
+everything here is open: the code, the data sources, the rules, and every design decision.
+Anyone can read it, check it, and help improve it.
+
+**Português.** O marola é um projeto de **ciência cidadã**. O mar é de todos, e o conhecimento
+sobre ele também deveria ser. Os órgãos públicos já medem muita coisa (balneabilidade, ondas,
+tempo), mas esses dados estão espalhados, são técnicos e difíceis de usar na praia. O marola
+junta essas informações, confere, explica em linguagem simples e devolve tudo ao público. E quem
+nada, surfa, pesca e mergulha todo dia pode contribuir de volta com o que vê na água. Por isso
+tudo aqui é aberto: o código, as fontes de dados, as regras e cada decisão de projeto.
+
+## Where it starts, and where it's going
+
+**First use case: the swim agent.** *"What's the best hour tomorrow to swim nearby?"* It already
+works: beaches from OpenStreetMap, sea and weather forecasts from Open-Meteo, official
+bathing-water quality from the state environmental agencies, all turned into a score from 0 to
+100 with the reasons spelled out.
+
+**The bigger ambition: the ocean intelligence layer for the coast.** Swimming is just the first
+question. The same data, and much more, can help protect people and places:
+
+- 🌊 **Coastal hazard warnings.** Starting with *ressaca* (storm surf that erodes Brazil's
+  beaches), with a hard "don't go in" when the sea gets dangerous
+  ([MIP-0062](./docs/mips/MIP-0062-ressaca-hazard.md)).
+- 🛰️ **Disaster forecasting with the same models the big agencies use.** marola's wave data
+  already includes NOAA's **WAVEWATCH III** model (through NCEP's GFS-Wave). The plan is to show
+  several models side by side, say openly when they disagree, and one day run a detailed wave
+  model for our own bays ([MIP-0051](./docs/mips/MIP-0051-wave-model-ensemble.md),
+  [MIP-0038](./docs/mips/MIP-0038-forecast-model-spread.md),
+  [MIP-0052](./docs/mips/MIP-0052-wave-model-compute.md)).
+- 🧪 **An open archive of Brazil's beach water quality**, versioned so anyone can study it
+  ([MIP-0056](./docs/mips/MIP-0056-oods-open-ocean-data-store.md)).
+- 🪼 **Reports from people at the beach.** Jellyfish, whales, and later photos of how the sea
+  looks right now, so real observations can check and improve the forecasts.
+- 🏄 **The rest of the sea.** Surfing, diving and fishing, as new questions over the same data.
+
+These are ideas at different stages. Each one is written up as a public design doc (a "MIP") before
+it's built, so you can see exactly what is done and what is still a plan: [`docs/mips/`](./docs/mips/README.md).
+
+## How you can help (no coding needed)
+
+- **Use the map** at [marola.dev](https://marola.dev/) and tell us when it's wrong. That's
+  valuable data.
+- **Tell us what you see in the water**, like jellyfish or whales, or a beach that's missing.
+- **Share local knowledge**: sea safety, marine life, local conditions. Every fact marola explains
+  comes from a sourced note in [`knowledge/`](./knowledge/).
+- **Open an issue**, in English or Portuguese: [github.com/marola-dev/marola/issues](https://github.com/marola-dev/marola/issues).
+
+---
+
+## For developers
+
+marola is Scala 3 ([Kyo](https://getkyo.io/)) on the JVM, with a free local model through
+[Ollama](https://ollama.com/). The score and its safety veto are deterministic Scala; the model
+only interprets and phrases, and never overturns a veto. The reasoning behind that split:
+[`PHILOSOPHY.md`](./PHILOSOPHY.md). The map is rebuilt every 3 hours and on every relevant merge
+to `main` ([`site.yml`](./.github/workflows/site.yml), [MIP-0005](./docs/mips/MIP-0005-map-and-static-site.md)).
 
 ```console
 $ just run -- --brief --lat -27.6733 --lon -48.4700   # real run, 7 Sep 2026; header lines and the last 2 of 6 beaches trimmed
@@ -49,14 +118,14 @@ water quality -> IMA/SC
  4. [ 40/100] Praia da Armação       (7.9km away)  best at Tue 8 Sep, 11:00  |  18.2°C sea, 15km/h wind  |  jellyfish: Moderate  |  whale sighting: High  |  breezy (15km/h), cold water (18.2°C), some jellyfish likelihood, 2/6 points PRÓPRIA — avoid Em frente à Avenida Antônio Borges dos Santos, n°792, Foz do Rio Sangradouro; Em frente à Rua Francisco Fagundes; Em frente à Rua Maria Emília de Costa, n°62; Em frente à Rua Antônio Aniceto da Costa  · facilities: no data
 ```
 
-## What you get
+### What you get
 
 - **Best hour tomorrow, per beach**: OpenStreetMap beaches, Open-Meteo sea/weather/tide forecasts, a 0-100 swimability score with the reasons, never at night.
-- **Official bathing-water quality, per sampling point**: Santa Catarina's IMA feed; unfit water zeroes the score in code, not a prompt.
+- **Official bathing-water quality, per sampling point**: IMA/SC, INEA and INEMA bulletins; unfit water zeroes the score in code, not a prompt.
 - **Tides, swell, wind, UV, jellyfish and whale odds**, and a sourced "did you know?" about the sea in front of you.
 - **Ask the ocean**: local RAG with `[n]` citations; off-corpus questions get an "unsourced" label instead of a refusal.
 
-## Run it in five minutes
+### Run it in five minutes
 
 ```bash
 nix develop                                                        # JDK 25, sbt, just, ollama — see flake.nix
@@ -75,7 +144,7 @@ real output: [`docs/RUN-LOCALLY.md`](./docs/RUN-LOCALLY.md). Docker instead of N
 docker compose --profile ollama run --rm marola --summarize --lat -27.6733 --lon -48.4700
 ```
 
-## The integrations: local and free
+### The integrations: local and free
 
 Every integration is a trait with a free local implementation. Full detail, including what's
 verified live vs. written-not-run: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) §5.
@@ -92,7 +161,7 @@ verified live vs. written-not-run: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.
 **Next:** the rest of the sea (surf, diving, fishing) as new scoring functions over the same data;
 roadmap: [`docs/mips/README.md`](./docs/mips/README.md), [`docs/FUTURE-WORK.md`](./docs/FUTURE-WORK.md) §1.
 
-## Documentation
+### Documentation
 
 **Start here:** [`docs/RUN-LOCALLY.md`](./docs/RUN-LOCALLY.md). Everything else lives under `docs/`:
 
@@ -109,7 +178,7 @@ roadmap: [`docs/mips/README.md`](./docs/mips/README.md), [`docs/FUTURE-WORK.md`]
 
 If you're an AI coding agent picking this repo up: read [`AGENTS.md`](./AGENTS.md) first.
 
-## marola-sea — the fine-tuned model
+### marola-sea — the fine-tuned model
 
 marola's own small model, trained on the repo's ocean corpus and published as GGUF:
 **[h0ffmann/marola-sea-tiny-GGUF](https://huggingface.co/h0ffmann/marola-sea-tiny-GGUF)**.
