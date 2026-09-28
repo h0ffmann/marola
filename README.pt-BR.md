@@ -52,23 +52,23 @@ pergunta. Os mesmos dados, e muitos outros, podem ajudar a proteger pessoas e lu
 
 - 🌊 **Alertas de risco costeiro.** Começando pela *ressaca*, que erode as praias do Brasil, com
   um "não entre" firme quando o mar fica perigoso
-  ([MIP-0062](./docs/mips/MIP-0062-ressaca-hazard.md)).
+  ([MIP-0062](./docs/MIPs/MIP-0062-ressaca-hazard.md)).
 - 🛰️ **Previsão de desastres com os mesmos modelos das grandes agências.** Os dados de ondas do
   marola já incluem o **WAVEWATCH III**, o modelo de ondas da NOAA (a agência americana de
   oceanos e atmosfera), através do GFS-Wave do NCEP. O plano é mostrar vários modelos lado a lado,
   dizer abertamente quando eles discordam e, um dia, rodar um modelo de ondas detalhado para as
-  nossas próprias baías ([MIP-0051](./docs/mips/MIP-0051-wave-model-ensemble.md),
-  [MIP-0038](./docs/mips/MIP-0038-forecast-model-spread.md),
-  [MIP-0052](./docs/mips/MIP-0052-wave-model-compute.md)).
+  nossas próprias baías ([MIP-0051](./docs/MIPs/MIP-0051-wave-model-ensemble.md),
+  [MIP-0038](./docs/MIPs/MIP-0038-forecast-model-spread.md),
+  [MIP-0052](./docs/MIPs/MIP-0052-wave-model-compute.md)).
 - 🧪 **Um arquivo aberto da balneabilidade das praias brasileiras**, versionado para que qualquer
-  pessoa possa estudar ([MIP-0056](./docs/mips/MIP-0056-oods-open-ocean-data-store.md)).
+  pessoa possa estudar ([MIP-0056](./docs/MIPs/MIP-0056-oods-open-ocean-data-store.md)).
 - 🪼 **Relatos de quem está na praia.** Água-viva, baleia e, mais adiante, fotos de como o mar
   está agora, para que observações reais confiram as previsões.
 - 🏄 **O resto do mar.** Surfe, mergulho e pesca, como novas perguntas sobre os mesmos dados.
 
 Essas ideias estão em estágios diferentes. Cada uma é escrita antes como um documento público de
 projeto (uma "MIP"), para que você veja exatamente o que já está pronto e o que ainda é plano:
-[`docs/mips/`](./docs/mips/README.md) (em inglês).
+[`docs/MIPs/`](./docs/MIPs/README.md) (em inglês).
 
 ## Como você pode ajudar (sem programar)
 
@@ -100,7 +100,7 @@ just ask "o que fazer se eu for pego por uma corrente de retorno?" # resposta co
 ```
 
 Sem conta na nuvem, sem chave de API. O resto da documentação técnica está em inglês:
-[`README.md`](./README.md#for-developers), [`docs/RUN-LOCALLY.md`](./docs/RUN-LOCALLY.md),
+[`README.md`](./README.md#for-developers), [`docs/1-Using-marola/RUN-LOCALLY.md`](./docs/1-Using-marola/RUN-LOCALLY.md),
 [`PHILOSOPHY.md`](./PHILOSOPHY.md) e [`CONTRIBUTING.md`](./CONTRIBUTING.md). Leia também o
 [Código de Conduta](./CODE_OF_CONDUCT.md).
 

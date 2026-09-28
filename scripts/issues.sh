@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # issues — the command surface for MIP-0063's GitHub tracking standard. One subcommand family
-# per task of the stack; this is `labels sync`.
+# per task of the stack; so far `labels sync`, `sub add`, `deps add|list`, `ready`/`queue`,
+# `tasks-to-issues`, `claim`, `milestone new` and `board setup|sync|gates`.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest_default="$root/.github/labels.yml"
+nwo=""
 
 usage() {
   cat <<'EOF'
@@ -18,10 +20,65 @@ commands:
       with --prune, and --prune refuses to delete more than half the repo's labels without
       --force. A manifest that defines no labels is refused outright.
 
+  sub add <parent> <child>
+      Make issue <child> a sub-issue of issue <parent>.
+
+  deps add <issue> --blocked-by <n>
+      Record that <issue> is blocked by issue <n>.
+
+  deps list <issue>
+      What <issue> is blocked by: number, state and title, one per line.
+
+  ready <issue>
+      Run the five-rule Definition of Ready (MIP-0063 §5.4), naming the rule that failed, then
+      add `agent-ready` on an all-pass and remove it when a previously-ready issue regressed.
+      A `mip` proposal is not claimable work and is refused outright; a `bug` reads rules 1 and 2
+      from bug_report.yml's own two fields.
+
+  queue [--milestone NAME]
+      The unassigned `agent-ready` issues, sorted size then priority, with a count of what is
+      ready, blocked and still in triage. Those counts are derived from the labels and the
+      dependency edges, not read from the board's Status field, which needs `project` scope.
+
+  tasks-to-issues <MIP-NNNN|path> [--milestone NAME]
+      File a MIP's task table as issues: one per row that has none, titled `NNNN-Tk: <slug>`
+      and deduped on that id, each row's `#` cell rewritten into a link to its issue, and one
+      native `blocked by` edge per entry of the `depends on` column. Idempotent — a second run
+      creates nothing, rewrites nothing and adds no edge. The milestone must already exist.
+      `area/*`, `layer/*` and `size/*` are a human's call and are not set here, so a filed row
+      is not `agent-ready` until someone labels it.
+
+  claim <issue>
+      Take an `agent-ready` issue: re-run the Definition of Ready, assign it to you, drop the
+      label, set the board's Status to In progress, and print the `scripts/stack.sh start` line.
+      Refuses an issue that is closed, assigned to someone else, or no longer ready.
+
+  milestone new "<name>" [--mip MIP-NNNN]
+      Create a deliverable milestone. Re-running with an existing name changes nothing.
+
+  board sync
+      Add every open issue to the project board, then set its Status from the issue's own state
+      (assigned, `agent-ready`, or neither) on the items carrying no Status and on those still
+      carrying `Backlog`, which is what the auto-add workflow writes rather than a state anyone
+      chose. Any other Status is someone's decision and is never overwritten. Run `board setup`
+      first: an issue whose state calls for a Status option the field lacks is skipped, not set.
+
+  board setup
+      Bring the project itself up to MIP-0063 §5.2: the Status options it is missing and the four
+      views. Idempotent, and it never removes or rewrites an option or a view that is already
+      there. Needs `project` scope.
+
+  board gates
+      File the five phase gate issues of MIP-0063 §5.3, named from ARCHITECTURE.md §11 and
+      labelled `phase/*`. Idempotent; a phase §11 marks done gets a closed gate. A one-time
+      bootstrap — `--dry-run` it and get a human's go-ahead before filing anything.
+
 options:
-  --dry-run     print the mutating `gh` calls instead of making them (the repo's current
-                labels are still read, so this needs a login)
-  --self-test   run the pure-function checks (parser, diff, plan); no `gh`, no network
+  --dry-run     print the mutating `gh` calls instead of making them (the reads they are
+                computed from still happen, so this needs a login)
+  --self-test   run the pure-function checks (parser, diff, plan, issue-form heading parse, the
+                five DoR rules) plus `ready`, `queue`, `tasks-to-issues`, `claim` and
+                `board sync|setup|gates` against a stubbed `gh`; no network, but needs python3
   --help        this text
 
 Live mode needs `gh` logged in. Inside ai-jail there is no login and none can be acquired
@@ -120,14 +177,329 @@ labels_plan() {
     | @tsv' <<<"$1"
 }
 
+# --- the Definition of Ready (MIP-0063 §5.4) ---
+
+# section_state <body> <heading> -> missing | empty | filled.
+# An optional issue-form field left blank still renders its heading, with `_No response_` under it,
+# so "the heading is there" is not the same question as "the author answered".
+section_state() {
+  awk -v h="### $2" '
+    { sub(/[ \t\r]+$/, "") }
+    $0 == h { found = 1; next }
+    found && /^#+ / { exit }
+    found && $0 != "" && $0 != "_No response_" { filled = 1; exit }
+    END { print (found ? (filled ? "filled" : "empty") : "missing") }
+  ' <<<"$1"
+}
+
+# dor_tier <labels> -> mip | bug | standard. Which tiers the DoR governs, and which headings rules
+# 1 and 2 read for each: MIP-0063 §5.4.
+dor_tier() {
+  if grep -qx 'mip' <<<"$1"; then echo mip
+  elif grep -qx 'bug' <<<"$1"; then echo bug
+  else echo standard
+  fi
+}
+
+# dor_section_rule <n> <name> <body> <heading> -> the rule's line; 0 iff the section carries content.
+dor_section_rule() {
+  case "$(section_state "$3" "$4")" in
+    filled) echo "  ✓ $1. $2 present" ;;
+    empty)  echo "  ✗ $1. $2 — \"### $4\" is empty"; return 1 ;;
+    *)      echo "  ✗ $1. $2 — no \"### $4\" section in the body"; return 1 ;;
+  esac
+}
+
+# dor_rules <body> <labels> <open-blockers> <tier> -> §3's one line per rule; 0 iff all five hold.
+# Pure: the caller does the two reads. <labels> and <open-blockers> are newline-separated.
+dor_rules() {
+  local body="$1" labels="$2" blockers="$3" tier="$4"
+  local h1="Acceptance criteria" h2="Named test" rc=0 missing=""
+  if [ "$tier" = bug ]; then h1="What you expected instead"; h2="Failing test"; fi
+
+  dor_section_rule 1 "acceptance criteria" "$body" "$h1" || rc=1
+  dor_section_rule 2 "named test" "$body" "$h2" || rc=1
+
+  grep -q '^area/' <<<"$labels" || missing="area/*"
+  grep -q '^layer/' <<<"$labels" || missing="${missing:+$missing and }layer/*"
+  if [ -z "$missing" ]; then echo "  ✓ 3. area/* and layer/* labels set"
+  else echo "  ✗ 3. $missing not set"; rc=1
+  fi
+
+  if grep -q '^size/' <<<"$labels"; then echo "  ✓ 4. size/* label set"
+  else echo "  ✗ 4. size/* label missing"; rc=1
+  fi
+
+  if [ -z "$blockers" ]; then echo "  ✓ 5. no open blocked-by dependency"
+  else echo "  ✗ 5. blocked by ${blockers//$'\n'/ } (still open)"; rc=1
+  fi
+  return "$rc"
+}
+
+# --- number -> database id ---
+
+# Both `POST /issues/{n}/sub_issues` (`sub_issue_id`) and `POST /issues/{n}/dependencies/blocked_by`
+# (`issue_id`) want the **database id**, not the issue number. marola's numbers are three digits
+# and this repo's ids are ten, so a number passed here addresses an issue in some unrelated
+# repository: refused, or attached to the wrong thing, with nothing in the response to say which.
+# MIP-0063 §4.1 — the POST is executed, the mis-attach is documented rather than reproduced.
+id_min_digits=9
+
+# guard_id <value> <what> — the refusal itself. issue_id_of applies it to everything it returns,
+# which is where both POSTs get their id from.
+guard_id() {
+  local id="$1" what="$2"
+  case "$id" in
+    ''|*[!0-9]*) echo "issues.sh: $what: \"$id\" is not a database id" >&2; return 1 ;;
+  esac
+  [ "${#id}" -ge "$id_min_digits" ] || {
+    echo "issues.sh: $what: $id has ${#id} digits — that is an issue number, not a database id. GitHub would accept it and attach a different issue." >&2
+    return 1
+  }
+}
+
+# issue_id_of <issue-json> <number> -> that issue's database id.
+issue_id_of() {
+  local payload="$1" number="$2" got id
+  got="$(jq -r '.number // empty' <<<"$payload" 2>/dev/null)" || got=""
+  # A lookup aimed at the wrong repo, or at an issue that was transferred, answers with a payload
+  # for a different number — whose id is a real id, so the guard below would happily pass it.
+  [ "$got" = "$number" ] || {
+    echo "issues.sh: asked for issue #$number, payload is #${got:-<none>} — refusing to use its id" >&2
+    return 1
+  }
+  # `GET /issues/{n}` answers for pull requests as well — they share one number sequence with
+  # issues — and a PR's database id is a real id that guard_id would pass. `sub add 414 413` with
+  # a PR number would attach the PR, which is the silent-wrong-object case this file exists for.
+  if jq -e 'has("pull_request")' <<<"$payload" >/dev/null 2>&1; then
+    echo "issues.sh: #$number is a pull request, not an issue — refusing to use its id" >&2
+    return 1
+  fi
+  id="$(jq -r '.id // empty' <<<"$payload" 2>/dev/null)" || id=""
+  guard_id "$id" "issue #$number" || return 1
+  printf '%s\n' "$id"
+}
+
+# arg_number <value> <what> -> a bare issue number; "#415" and "415" both read.
+arg_number() {
+  local n="${1#\#}"
+  case "$n" in
+    ''|*[!0-9]*) echo "issues.sh: $2: \"$1\" is not an issue number" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$n"
+}
+
 # --- live side ---
 
+# Memoised like resolve_nwo's $nwo: `tasks-to-issues` reaches this once per edge through
+# cmd_deps_add, and `gh auth status` is a network round trip.
+gh_checked=0
 require_gh() {
+  [ "$gh_checked" -eq 0 ] || return 0
   command -v gh >/dev/null || { echo "issues.sh: gh is not installed" >&2; exit 1; }
-  gh auth status >/dev/null 2>&1 || {
+  gh auth status </dev/null >/dev/null 2>&1 || {
     echo "issues.sh: gh is not logged in. Inside ai-jail there is no login and none can be acquired (AGENTS.md) — run this from the host, or use --dry-run." >&2
     exit 1
   }
+  gh_checked=1
+}
+
+# gh picks its target repo from the current directory, but everything this script acts on comes
+# from its own checkout. Run issues.sh from inside another clone and it would reconcile that repo
+# against marola's taxonomy — and --prune would delete the difference. Resolve once, from $root;
+# `gh api` has no --repo, so for those calls the pin is spelling $nwo into the path.
+resolve_nwo() {
+  [ -n "$nwo" ] || nwo="$(cd "$root" && gh repo view --json nameWithOwner -q .nameWithOwner </dev/null)"
+}
+
+issue_payload() {
+  local number="$1" payload err rc=0
+  err="$(mktemp)"
+  payload="$(gh api "repos/$nwo/issues/$number" </dev/null 2>"$err")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # A 401, a 403 rate-limit and a DNS failure are not "no such issue". Reporting all of them as
+    # one sends an unattended run after the wrong cause, so anything but a 404 quotes gh.
+    if grep -q 'HTTP 404' "$err"; then
+      echo "issues.sh: issue #$number not found on $nwo" >&2
+    else
+      { echo "issues.sh: looking up issue #$number on $nwo failed:"; sed 's/^/  /' "$err"; } >&2
+    fi
+  fi
+  rm -f "$err"
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s\n' "$payload"
+}
+
+# The one place a number becomes an id. Both POSTs below go through it.
+resolve_issue_id() {
+  local payload
+  payload="$(issue_payload "$1")" || return 1
+  issue_id_of "$payload" "$1"
+}
+
+cmd_sub_add() {
+  [ $# -eq 2 ] || { echo "issues.sh sub add: expects <parent> <child>" >&2; usage >&2; exit 1; }
+  local parent child child_id
+  parent="$(arg_number "$1" "sub add")" || exit 1
+  child="$(arg_number "$2" "sub add")" || exit 1
+  [ "$parent" != "$child" ] || { echo "issues.sh sub add: #$parent cannot be its own sub-issue" >&2; exit 1; }
+  require_gh
+  resolve_nwo
+  child_id="$(resolve_issue_id "$child")" || exit 1
+  # -F, not -f: sub_issue_id is an integer in the API schema and -f would send it quoted.
+  run gh api --method POST "repos/$nwo/issues/$parent/sub_issues" -F "sub_issue_id=$child_id"
+}
+
+# `return`, never `exit`: `tasks-to-issues` calls this once per edge and counts what failed, and an
+# `exit` here would leave the shell from inside that `if` — no summary, half the edges unwired, and
+# the accumulator unreachable. The standalone `deps add` path still exits non-zero, via set -e.
+cmd_deps_add() {
+  [ $# -ge 1 ] || { echo "issues.sh deps add: expects <issue> --blocked-by <n>" >&2; usage >&2; return 1; }
+  local issue blocker="" blocker_id
+  issue="$(arg_number "$1" "deps add")" || return 1
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --blocked-by)
+        [ $# -ge 2 ] || { echo "issues.sh deps add: --blocked-by needs an issue number" >&2; return 1; }
+        [ -z "$blocker" ] || { echo "issues.sh deps add: --blocked-by given twice (#$blocker, then $2) — one edge per call" >&2; return 1; }
+        blocker="$(arg_number "$2" "deps add --blocked-by")" || return 1
+        shift 2 ;;
+      *) echo "issues.sh deps add: unknown argument: $1" >&2; usage >&2; return 1 ;;
+    esac
+  done
+  [ -n "$blocker" ] || { echo "issues.sh deps add: --blocked-by <n> is required" >&2; return 1; }
+  [ "$issue" != "$blocker" ] || { echo "issues.sh deps add: #$issue cannot block itself" >&2; return 1; }
+  require_gh
+  resolve_nwo
+  blocker_id="$(resolve_issue_id "$blocker")" || return 1
+  run gh api --method POST "repos/$nwo/issues/$issue/dependencies/blocked_by" -F "issue_id=$blocker_id"
+}
+
+cmd_deps_list() {
+  [ $# -eq 1 ] || { echo "issues.sh deps list: expects <issue>" >&2; usage >&2; exit 1; }
+  local issue
+  issue="$(arg_number "$1" "deps list")" || exit 1
+  require_gh
+  resolve_nwo
+  # --paginate: the default page is 30 and §4.2 allows 50 edges per relationship type, so an
+  # unpaginated read would silently drop the rest — and a dropped blocker reads as no blocker.
+  # </dev/null on this and every other read: only run()'s mutating calls were protected, and a
+  # `gh` that reads stdin eats the caller's — task 5 drives these commands from a read loop.
+  gh api --paginate "repos/$nwo/issues/$issue/dependencies/blocked_by" </dev/null \
+    --jq '.[] | "#\(.number)\t\(.state)\t\(.title)"'
+}
+
+# §5.2: `agent-ready` is a label *and* a board Status value, and nothing but this script writes
+# either. The removal is the half that rots if it is skipped — an issue that regressed keeps the
+# label, and the agent queue quietly fills with work that no longer passes.
+dor_apply_label() {
+  local n="$1" rc="$2" had="$3"
+  if [ "$rc" -eq 0 ]; then
+    [ "$had" -eq 0 ] || { echo "  label \`agent-ready\` already set"; return 0; }
+    run gh issue edit --repo "$nwo" "$n" --add-label agent-ready || return 1
+    echo "  label \`agent-ready\` added$(dry_tag)"
+  else
+    [ "$had" -eq 1 ] || { echo "  label \`agent-ready\` not added"; return 0; }
+    run gh issue edit --repo "$nwo" "$n" --remove-label agent-ready || return 1
+    echo "  label \`agent-ready\` removed$(dry_tag)"
+  fi
+}
+
+cmd_ready() {
+  [ $# -eq 1 ] || { echo "issues.sh ready: expects <issue>" >&2; usage >&2; return 1; }
+  local n
+  n="$(arg_number "$1" "ready")" || return 1
+  require_gh
+  resolve_nwo
+  local payload body labels tier blockers rules rc=0 had=0
+  payload="$(issue_payload "$n")" || return 1
+  # For the payload-is-really-#n and not-a-pull-request guards; `ready` has no use for the id.
+  # `return`, never `exit`: cmd_claim calls this inside a guard, and an exit here would leave the
+  # shell from inside it — claim's own diagnostic never printed.
+  issue_id_of "$payload" "$n" >/dev/null || return 1
+  body="$(jq -r '.body // ""' <<<"$payload")"
+  labels="$(jq -r '(.labels // [])[].name' <<<"$payload")"
+  grep -qx 'agent-ready' <<<"$labels" && had=1 || true
+  tier="$(dor_tier "$labels")"
+
+  if [ "$tier" = mip ]; then
+    rc=1
+    echo "✗ #$n is not agent-ready — it is a MIP proposal, and the DoR does not apply (MIP-0063 §5.1)"
+  else
+    # --paginate and </dev/null for the same two reasons as `deps list`: 50 edges are allowed and a
+    # dropped blocker reads as no blocker, and a gh that reads stdin eats the caller's.
+    blockers="$(gh api --paginate "repos/$nwo/issues/$n/dependencies/blocked_by" </dev/null \
+      --jq '.[] | select(.state == "open") | "#\(.number)"')"
+    rules="$(dor_rules "$body" "$labels" "$blockers" "$tier")" || rc=$?
+    if [ "$rc" -eq 0 ]; then echo "✓ #$n is agent-ready"; else echo "✗ #$n is not agent-ready"; fi
+    [ "$tier" != bug ] || echo "  bug: rules 1 and 2 read \"### What you expected instead\" and \"### Failing test\" (MIP-0063 §5.4)"
+    printf '%s\n' "$rules"
+  fi
+
+  dor_apply_label "$n" "$rc" "$had" || return 1
+  return "$rc"
+}
+
+cmd_queue() {
+  local milestone=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --milestone)
+        [ $# -ge 2 ] || { echo "issues.sh queue: --milestone needs a name" >&2; exit 1; }
+        milestone="$2"; shift 2 ;;
+      *) echo "issues.sh queue: unknown argument: $1" >&2; usage >&2; exit 1 ;;
+    esac
+  done
+  require_gh
+  resolve_nwo
+
+  local limit=300 list n_open
+  list="$(gh issue list --repo "$nwo" --state open --limit "$limit" \
+    --json number,title,labels,assignees,milestone </dev/null)"
+  n_open="$(jq 'length' <<<"$list")"
+  # Past the limit gh stops silently, and a truncated queue is the one failure mode nobody notices:
+  # the missing issues read as "nothing ready".
+  if [ "$n_open" -ge "$limit" ]; then
+    echo "issues.sh: the repo has at least $limit open issues, this script's page limit — raise it before trusting this queue." >&2
+    exit 1
+  fi
+
+  local pool rows others n open_blockers blocked=0 ready_n others_n
+  pool="$(jq --arg ms "$milestone" '
+    [ .[]
+      | select((.assignees | length) == 0)
+      | select($ms == "" or (.milestone.title // "") == $ms)
+      | { number, title, labels: [.labels[].name] } ]' <<<"$list")"
+
+  rows="$(jq -r '
+    def first_label(p): ([ .labels[] | select(startswith(p)) ] | first) // "";
+    # Ranks, not `index(first_label(…))`: jq evaluates an argument against the filter it is passed
+    # to, so inside index() the input is the array being searched, not the issue.
+    def size_rank: if (.labels | index("size/S")) then 0
+                   elif (.labels | index("size/M")) then 1
+                   elif (.labels | index("size/L")) then 2 else 9 end;
+    [ .[] | select(.labels | index("agent-ready")) ]
+    | sort_by(size_rank, (if (.labels | index("priority/high")) then 0 else 1 end), .number)
+    | .[] | [.number, first_label("size/"), first_label("area/"), first_label("layer/"), .title]
+    | @tsv' <<<"$pool")"
+  [ -z "$rows" ] || awk -F'\t' '{ printf "#%-4s  %-6s  %-18s  %-12s  %s\n", $1, $2, $3, $4, $5 }' <<<"$rows"
+
+  ready_n="$(jq '[ .[] | select(.labels | index("agent-ready")) ] | length' <<<"$pool")"
+  others="$(jq -r '.[] | select(.labels | index("agent-ready") | not) | .number' <<<"$pool")"
+  others_n="$(grep -c . <<<"$others" || true)"
+  while read -r n; do
+    [ -n "$n" ] || continue
+    # Assigned to a variable, not tested inline: a failed read inside `[ -z "$(…)" ]` is invisible
+    # and would count a blocked issue as triage. </dev/null because this loop's stdin is $others.
+    open_blockers="$(gh api --paginate "repos/$nwo/issues/$n/dependencies/blocked_by" </dev/null \
+      --jq '.[] | select(.state == "open") | .number')"
+    [ -z "$open_blockers" ] || blocked=$((blocked + 1))
+  done <<<"$others"
+  # "in triage" is everything else unclaimed, not the board's Triage Status: reading that needs the
+  # `project` scope §4.4 leaves to a human, and `queue` is the call an agent makes from a jail.
+  printf '      %d ready · %d blocked · %d in triage%s\n' \
+    "$ready_n" "$blocked" "$((others_n - blocked))" "${milestone:+   (milestone: $milestone)}"
 }
 
 cmd_labels_sync() {
@@ -155,14 +527,9 @@ cmd_labels_sync() {
   fi
 
   require_gh
-  # gh picks its target repo from the current directory, but the manifest always comes from this
-  # script's own checkout. Run issues.sh from inside another clone and it would reconcile that
-  # repo against marola's taxonomy — and --prune would delete the difference. Resolve the repo
-  # once, from $root, and pin every call to it.
-  local nwo
-  nwo="$(cd "$root" && gh repo view --json nameWithOwner -q .nameWithOwner)"
+  resolve_nwo
   local limit=500 rjson n_repo
-  rjson="$(gh label list --repo "$nwo" --limit "$limit" --json name,color,description)"
+  rjson="$(gh label list --repo "$nwo" --limit "$limit" --json name,color,description </dev/null)"
   n_repo="$(jq 'length' <<<"$rjson")"
   # Past the limit gh stops silently, and an unseen label reads as "missing from the repo": sync
   # would try to create labels that already exist and, with --prune, never report the real orphans.
@@ -217,17 +584,793 @@ cmd_labels_sync() {
           run gh label edit --repo "$nwo" "$addr" --color "$color" --description "$desc" || rc=$?
         fi ;;
       delete) run gh label delete --repo "$nwo" "$addr" --yes || rc=$? ;;
+      *) rc=1 ;;
     esac
     if [ "$rc" -eq 0 ]; then applied=$((applied + 1)); else failed=$((failed + 1)); fi
   done <<<"$plan"
 
+  echo "labels: $applied of $((applied + failed)) actions applied, $n_orphan orphaned ($n_manifest in the manifest)$(dry_tag)"
   if [ "$failed" -gt 0 ]; then
     echo "issues.sh: $failed of $((applied + failed)) label actions failed, $applied applied — the repo is part-way through the plan. Fix the cause and re-run; sync is idempotent." >&2
     exit 1
   fi
 }
 
+# milestone_number <title> -> that milestone's number, or empty.
+# state=all: a closed milestone still owns its title, so creating over one 422s rather than doing
+# nothing, and both callers have to read a no-op either way.
+milestone_number() {
+  gh api --paginate "repos/$nwo/milestones?state=all&per_page=100" </dev/null \
+    --jq '.[] | "\(.number)\t\(.title)"' | awk -F'\t' -v t="$1" '$2 == t { print $1; exit }'
+}
+
+# --- tasks-to-issues (MIP-0063 §5.5) ---
+
+# One MIP's task table projected into GitHub: an issue per row that has none, the row's `#` cell
+# rewritten into a link to it, and one native `blocked by` edge per entry of the `depends on`
+# column. scripts/lib/tasks_issues.py does the reading and the rewrite; this does the gh calls.
+# One-way and re-runnable: after this, issues own status and the file owns the plan.
+cmd_tasks_to_issues() {
+  local arg="" milestone="" file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --milestone)
+        [ $# -ge 2 ] || { echo "issues.sh tasks-to-issues: --milestone needs a name" >&2; exit 1; }
+        milestone="$2"; shift 2 ;;
+      -*) echo "issues.sh tasks-to-issues: unknown argument: $1" >&2; usage >&2; exit 1 ;;
+      *)
+        [ -z "$arg" ] || { echo "issues.sh tasks-to-issues: one task list per run (got \"$arg\" and \"$1\")" >&2; exit 1; }
+        arg="$1"; shift ;;
+    esac
+  done
+  [ -n "$arg" ] || { echo "issues.sh tasks-to-issues: expects <MIP-NNNN|path/to/MIP-NNNN.tasks.md>" >&2; usage >&2; exit 1; }
+  case "$arg" in
+    MIP-[0-9][0-9][0-9][0-9]) file="$root/docs/MIPs/$arg.tasks.md" ;;
+    *) file="$arg" ;;
+  esac
+  [ -f "$file" ] || { echo "issues.sh tasks-to-issues: no such task list: $file" >&2; exit 1; }
+
+  require_gh
+  resolve_nwo
+
+  local -a ms_args=()
+  if [ -n "$milestone" ]; then
+    # Decision 6: this command never invents a milestone. Checked before anything is created, not
+    # at the first `gh issue create`, which is the difference between "nothing happened" and
+    # "three of eight rows are filed and the rest aborted".
+    [ -n "$(milestone_number "$milestone")" ] || {
+      echo "issues.sh tasks-to-issues: $nwo has no milestone named \"$milestone\" — create it first (MIP-0063 Decision 6)" >&2
+      exit 1
+    }
+    ms_args=(--milestone "$milestone")
+  fi
+
+  # --state all: the dedup has to see closed task issues too, or a re-run after a task merges
+  # files it a second time. The limit guard is `queue`'s — past it gh truncates in silence, and a
+  # truncated list reads as "not filed yet".
+  local limit=500 issues n_issues
+  issues="$(gh issue list --repo "$nwo" --state all --limit "$limit" --json number,title </dev/null)"
+  n_issues="$(jq 'length' <<<"$issues")"
+  [ "$n_issues" -lt "$limit" ] || {
+    echo "issues.sh: $nwo has at least $limit issues, this script's page limit — raise it before trusting the dedup." >&2
+    exit 1
+  }
+
+  local issues_file plan rc=0
+  issues_file="$(mktemp)"
+  printf '%s\n' "$issues" > "$issues_file"
+  plan="$(python3 "$root/scripts/lib/tasks_issues.py" plan "$file" --repo "$nwo" --issues "$issues_file")" || rc=$?
+  rm -f "$issues_file"
+  [ "$rc" -eq 0 ] || exit 1
+
+  local mip n_rows n_new
+  mip="$(jq -r '.mip' <<<"$plan")"
+  n_rows="$(jq '.rows | length' <<<"$plan")"
+  echo "tasks-to-issues: MIP-$mip, $n_rows rows → $nwo${milestone:+   (milestone: $milestone)}"
+
+  # §5.1 makes the milestone the deliverable an issue belongs to, so filing without one is a real
+  # choice, not a default. Said once, and only when this run would actually create something.
+  n_new="$(jq '[.rows[] | select(.issue == null)] | length' <<<"$plan")"
+  if [ "$dry" -eq 0 ] && [ -z "$milestone" ] && [ "$n_new" -gt 0 ]; then
+    echo "issues.sh tasks-to-issues: no --milestone — the $n_new new issue(s) will belong to no deliverable (MIP-0063 §5.1)." >&2
+  fi
+
+  local map='{}' i id title body number url created=0 existing=0 failed=0
+  for ((i = 0; i < n_rows; i++)); do
+    id="$(jq -r ".rows[$i].id" <<<"$plan")"
+    number="$(jq -r ".rows[$i].issue // empty" <<<"$plan")"
+    title="$(jq -r ".rows[$i].title" <<<"$plan")"
+    if [ -n "$number" ]; then
+      printf '  %-10s #%-6s already filed\n' "$mip-T$id" "$number"
+      existing=$((existing + 1))
+      map="$(jq -c --arg k "$id" --argjson v "$number" '.[$k] = $v' <<<"$map")"
+      continue
+    fi
+    body="$(jq -r ".rows[$i].body" <<<"$plan")"
+    if [ "$dry" -eq 1 ]; then
+      printf '  %-10s would create: %s\n' "$mip-T$id" "$title"
+      run gh issue create --repo "$nwo" --title "$title" --body "$body" ${ms_args[@]+"${ms_args[@]}"}
+      created=$((created + 1))
+      continue
+    fi
+    # Not through run(): it sends the child's stdout to /dev/null, and the new issue's URL is the
+    # one piece of output the rest of this command cannot do without.
+    rc=0
+    url="$(gh issue create --repo "$nwo" --title "$title" --body "$body" ${ms_args[@]+"${ms_args[@]}"} </dev/null)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "issues.sh tasks-to-issues: creating $mip-T$id failed (exit $rc)" >&2
+      failed=$((failed + 1))
+      continue
+    fi
+    # The issue exists by now, so the diagnostic has to carry the URL itself: arg_number quotes
+    # the last path segment, which in this very case is usually empty.
+    number="$(arg_number "${url##*/}" "the URL gh printed for $mip-T$id")" || {
+      echo "issues.sh: $mip-T$id was created but gh printed an unparseable URL: $url — link it by hand" >&2
+      failed=$((failed + 1)); continue
+    }
+    printf '  %-10s #%-6s created\n' "$mip-T$id" "$number"
+    created=$((created + 1))
+    map="$(jq -c --arg k "$id" --argjson v "$number" '.[$k] = $v' <<<"$map")"
+  done
+
+  local -a link_args=()
+  [ "$dry" -eq 0 ] || link_args=(--dry-run)
+  local linked n_linked
+  linked="$(python3 "$root/scripts/lib/tasks_issues.py" link "$file" --repo "$nwo" --map "$map" ${link_args[@]+"${link_args[@]}"})" \
+    || { linked=""; failed=$((failed + 1)); }
+  n_linked="$(grep -c . <<<"$linked" || true)"
+  [ -z "$linked" ] || sed 's/^/  link: /' <<<"$linked"
+
+  local deps dep dep_number present wired=0 already=0 pending=0
+  for ((i = 0; i < n_rows; i++)); do
+    id="$(jq -r ".rows[$i].id" <<<"$plan")"
+    deps="$(jq -r ".rows[$i].deps[]?" <<<"$plan")"
+    [ -n "$deps" ] || continue
+    number="$(jq -r --arg k "$id" '.[$k] // empty' <<<"$map")"
+    present=""
+    # No state filter: the 2026-09-27 probe found an edge survives closing both issues and reads
+    # back as closed, so a closed blocker is still an edge and re-adding it would be a duplicate.
+    [ -z "$number" ] || present="$(gh api --paginate "repos/$nwo/issues/$number/dependencies/blocked_by" </dev/null --jq '.[].number')"
+    while read -r dep; do
+      [ -n "$dep" ] || continue
+      dep_number="$(jq -r --arg k "$dep" --argjson cross "$(jq -c '.cross' <<<"$plan")" '.[$k] // $cross[$k] // empty' <<<"$map")"
+      if [ -z "$number" ] || [ -z "$dep_number" ]; then
+        printf '  edge: %s blocked by %s — pending, one of the two is not filed yet\n' "$mip-T$id" "$(case "$dep" in *-T*) echo "$dep" ;; *) echo "$mip-T$dep" ;; esac)"
+        pending=$((pending + 1))
+      elif grep -qx "$dep_number" <<<"$present"; then
+        printf '  edge: #%s blocked by #%s — already wired\n' "$number" "$dep_number"
+        already=$((already + 1))
+      elif printf '  edge: #%s blocked by #%s\n' "$number" "$dep_number" && cmd_deps_add "$number" --blocked-by "$dep_number"; then
+        wired=$((wired + 1))
+      else
+        failed=$((failed + 1))
+      fi
+    done <<<"$deps"
+  done
+
+  printf 'summary: %d created, %d already filed · %d rows linked · %d edges wired, %d already wired, %d pending%s\n' \
+    "$created" "$existing" "$n_linked" "$wired" "$already" "$pending" "$(dry_tag)"
+  [ "$failed" -eq 0 ] || {
+    echo "issues.sh tasks-to-issues: $failed action(s) failed — fix the cause and re-run; this command is idempotent." >&2
+    exit 1
+  }
+}
+
+# --- the board (MIP-0063 §5.2), claiming (§5.5) and the phase gates (§5.3) ---
+
+# Projects v2 is GraphQL-only — no REST, no `--repo`, no page of the API that `gh api` reaches the
+# way the rest of this file does. Everything that touches it goes through `gh project`, and the
+# lookups that turn a title into a project number and a Status name into an option id live here
+# and nowhere else.
+board_title="Marola"
+board_number=""
+board_id=""
+
+# has_scope <comma-separated> <scope> — split, not substring: `read:project` contains `project`.
+has_scope() {
+  tr ',' '\n' <<<"$1" | tr -d ' \r' | grep -qx "$2"
+}
+
+# token_scopes -> the token's scopes. A fine-grained PAT sends no X-OAuth-Scopes header, so under
+# `pipefail` this exits nonzero with empty output and every caller has to absorb that.
+token_scopes() {
+  gh api -i user </dev/null 2>/dev/null | grep -i '^x-oauth-scopes:' | head -1 | cut -d: -f2- | tr -d ' \r'
+}
+
+# board_require_write — §4.4's human prerequisite, stated once.
+board_require_write() {
+  local scopes
+  # || true: no header means the grep inside fails, and `pipefail` would take the script out with
+  # no message at all — the opposite of what the branch below is for.
+  scopes="$(token_scopes || true)"
+  if [ -z "$scopes" ]; then
+    echo "issues.sh: this token sends no X-OAuth-Scopes header (a fine-grained PAT does not) — attempting the board write anyway." >&2
+    return 0
+  fi
+  has_scope "$scopes" project && return 0
+  echo "issues.sh: this token has \`read:project\` but not \`project\`, so it cannot write the board (MIP-0063 §4.4). A human runs: gh auth refresh -s project" >&2
+  # --dry-run writes nothing and the reads need only `read:project`, so the missing scope is not
+  # yet a reason to refuse: seeing the plan is how anyone decides whether to ask for the scope.
+  [ "$dry" -eq 0 ] || return 0
+  return 1
+}
+
+# board_resolve -> $board_number and $board_id for $board_title, under $nwo's owner.
+board_resolve() {
+  [ -z "$board_number" ] || return 0
+  local owner="${nwo%%/*}" projects n
+  projects="$(gh project list --owner "$owner" --format json --limit 100 </dev/null)"
+  n="$(jq --arg t "$board_title" '[ .projects[] | select((.title | ascii_downcase) == ($t | ascii_downcase)) ] | length' <<<"$projects")"
+  # §5.2 names one board. Two projects sharing a title is a human decision this script must not
+  # make for them, and zero means the board is not there to sync against.
+  [ "$n" -eq 1 ] || {
+    echo "issues.sh: expected exactly one project titled \"$board_title\" under $owner, found $n (MIP-0063 §5.2)." >&2
+    return 1
+  }
+  board_number="$(jq -r --arg t "$board_title" '.projects[] | select((.title | ascii_downcase) == ($t | ascii_downcase)) | .number' <<<"$projects")"
+  board_id="$(jq -r --arg t "$board_title" '.projects[] | select((.title | ascii_downcase) == ($t | ascii_downcase)) | .id' <<<"$projects")"
+}
+
+# board_items <owner> -> the project's items as a JSON array.
+board_items() {
+  local limit=500 raw n
+  raw="$(gh project item-list "$board_number" --owner "$1" --format json --limit "$limit" </dev/null)"
+  n="$(jq '.items | length' <<<"$raw")"
+  # Same trap as `queue`'s page limit: an unseen item reads as "not on the board", and the sync
+  # would add a second copy of it.
+  [ "$n" -lt "$limit" ] || {
+    echo "issues.sh: the board holds at least $limit items, this script's page limit — raise it before trusting the sync." >&2
+    return 1
+  }
+  jq '.items' <<<"$raw"
+}
+
+# board_status_option <fields-json> <option-name> -> "<field-id>\t<option-id>", empty when absent.
+# Empty, not the nearest name: an option §5.2 defines but the board lacks must be reported, never
+# silently swapped for one nobody is looking at.
+board_status_option() {
+  jq -r --arg name "$2" '
+    .fields[] | select(.name == "Status" and .type == "ProjectV2SingleSelectField")
+    | .id as $f | .options[] | select(.name == $name) | [$f, .id] | @tsv' <<<"$1"
+}
+
+# board_item_id <items-json> <nwo> <issue-number> -> that issue's project item id, or empty.
+# Pinned to the repository as well as the number: one board can hold several repos, and issue
+# numbers are only unique within one.
+board_item_id() {
+  jq -r --arg nwo "$2" --arg n "$3" '
+    [ .[] | select((.content.repository // "") == $nwo and ((.content.number // -1) | tostring) == $n) | .id ]
+    | first // ""' <<<"$1"
+}
+
+# The Status the project's built-in auto-add workflow writes when it puts an issue on the board
+# (§4.4). It is the one value that means "nobody has looked at this yet" rather than a state
+# someone chose, which is why `board_plan` may overwrite it and may overwrite nothing else.
+board_autoadd_status="Backlog"
+
+# board_plan <items-json> <issues-json> <nwo> -> one TSV action per line:
+#   add   <issue-url> <status> <number>   — not on the board
+#   set   <item-id>   <status> <number>   — on the board with no Status at all
+#   adopt <item-id>   <status> <number>   — on the board carrying only the auto-add default
+# Status follows the issue's state: assigned is In progress, `agent-ready` is Ready, anything else
+# is still Triage. Every other Status is left alone — `sync` is not the `agent-ready`↔Status
+# reconciliation job §8 defers to §11.1, and pulling a card a maintainer dragged to In review back
+# to Triage every run would undo their work. `Backlog` is the exception because nobody dragged it
+# there; the auto-add workflow wrote it, and adopting it once is what lets an issue's first
+# contact with the board mean anything at all.
+board_plan() {
+  jq -rn --argjson items "$1" --argjson issues "$2" --arg nwo "$3" --arg auto "$board_autoadd_status" '
+    def want: if (((.assignees // []) | length) > 0) then "In progress"
+              elif ([(.labels // [])[] | .name] | index("agent-ready")) then "Ready"
+              else "Triage" end;
+    ( [ $items[] | select((.content.repository // "") == $nwo and .content.number != null)
+        | {key: (.content.number | tostring), value: .} ] | from_entries ) as $by
+    | $issues[] | . as $i | ($i | want) as $w | $by[$i.number | tostring] as $it
+    | if $it == null then ["add", $i.url, $w, ($i.number | tostring)]
+      elif (($it.status // "") == "") then ["set", $it.id, $w, ($i.number | tostring)]
+      elif ($it.status == $auto) then ["adopt", $it.id, $w, ($i.number | tostring)]
+      else empty end
+    | @tsv'
+}
+
+# board_status_missing <quoted option name(s)> [how many issues it left alone]
+board_status_missing() {
+  echo "issues.sh:${2:+ $2 issue(s) left alone —} the board's Status field has no $1 option — run \`scripts/issues.sh board setup\` first. §5.2's six are Triage / Spec / Ready / In progress / In review / Done; adding one is a \`project\`-scope action in the project UI." >&2
+}
+
+# board_set_status <number> <url> <status> — put one issue on the board and set its Status.
+board_set_status() {
+  local number="$1" url="$2" status="$3" owner="${nwo%%/*}" fields items item pair fid oid
+  board_require_write || return 1
+  board_resolve || return 1
+  fields="$(gh project field-list "$board_number" --owner "$owner" --format json --limit 100 </dev/null)"
+  pair="$(board_status_option "$fields" "$status")"
+  [ -n "$pair" ] || { board_status_missing "\"$status\""; return 1; }
+  items="$(board_items "$owner")" || return 1
+  item="$(board_item_id "$items" "$nwo" "$number")"
+  if [ -z "$item" ]; then
+    run gh project item-add "$board_number" --owner "$owner" --url "$url" || return 1
+    # An item has no id until it is on the board, so the edit needs a second read. --dry-run
+    # cannot do that read, and says so rather than printing an edit against an invented id.
+    [ "$dry" -eq 0 ] || { echo "  #$number's Status is set on the real run, once it has an item id"; return 0; }
+    items="$(board_items "$owner")" || return 1
+    item="$(board_item_id "$items" "$nwo" "$number")"
+    [ -n "$item" ] || { echo "issues.sh: #$number is still not on the board after adding it" >&2; return 1; }
+  fi
+  fid="${pair%%$'\t'*}"; oid="${pair##*$'\t'}"
+  run gh project item-edit --id "$item" --project-id "$board_id" --field-id "$fid" --single-select-option-id "$oid"
+}
+
+# task_ref <title> -> "<mip-digits> <task-number>" for a `NNNN-Tk: …` title (§5.5's shape), else "".
+task_ref() {
+  sed -n 's/^\([0-9]\{4\}\)-T\([0-9]\{1,\}\):.*/\1 \2/p' <<<"$1"
+}
+
+# tasks_slug <mip-digits> <task-number> -> that row's `slug` cell in docs/MIPs/MIP-NNNN.tasks.md.
+# The branch is `mip-NNNN/<k>-<slug>` and the slug exists only in that file, so reading it is what
+# makes the printed line something to paste rather than something to go and look up.
+tasks_slug() {
+  local file="$root/docs/MIPs/MIP-$1.tasks.md"
+  [ -f "$file" ] || return 0
+  awk -F'|' -v k="$2" '
+    /^\|/ {
+      # The `#` cell is a markdown link whose URL also holds digits, so take the first run of
+      # digits in the cell, not every digit in it.
+      num = $2; sub(/^[^0-9]*/, "", num); sub(/[^0-9].*$/, "", num)
+      if (num != "" && num == k) { slug = $3; gsub(/^[ \t]+|[ \t]+$/, "", slug); print slug; exit }
+    }' "$file"
+}
+
+# stack_line <title> -> the `scripts/stack.sh start` line for a MIP task issue, else "".
+stack_line() {
+  local ref mip k slug
+  ref="$(task_ref "$1")"
+  [ -n "$ref" ] || return 0
+  mip="${ref%% *}"; k="${ref##* }"
+  slug="$(tasks_slug "$mip" "$k")"
+  [ -n "$slug" ] || slug="<slug>"
+  printf 'scripts/stack.sh start MIP-%s %s %s\n' "$mip" "$k" "$slug"
+}
+
+cmd_claim() {
+  [ $# -eq 1 ] || { echo "issues.sh claim: expects <issue>" >&2; usage >&2; exit 1; }
+  local n
+  n="$(arg_number "$1" "claim")" || exit 1
+  require_gh
+  resolve_nwo
+
+  local payload state labels assignees me url title line
+  payload="$(issue_payload "$n")" || exit 1
+  # For the payload-is-really-#n and not-a-pull-request guards; `claim` has no use for the id.
+  issue_id_of "$payload" "$n" >/dev/null || exit 1
+  state="$(jq -r '.state // ""' <<<"$payload")"
+  labels="$(jq -r '(.labels // [])[].name' <<<"$payload")"
+  assignees="$(jq -r '(.assignees // [])[].login' <<<"$payload")"
+  url="$(jq -r '.html_url // ""' <<<"$payload")"
+  title="$(jq -r '.title // ""' <<<"$payload")"
+
+  [ "$state" = open ] || { echo "issues.sh claim: #$n is $state, not open" >&2; exit 1; }
+  grep -qx 'agent-ready' <<<"$labels" || {
+    echo "issues.sh claim: #$n is not \`agent-ready\` — run \`just issue-ready $n\` and fix the rule it names (MIP-0063 §5.4)." >&2
+    exit 1
+  }
+  me="$(gh api user </dev/null --jq .login)"
+  if [ -n "$assignees" ] && ! grep -qx "$me" <<<"$assignees"; then
+    echo "issues.sh claim: #$n is already assigned to ${assignees//$'\n'/, } — claiming it would take it off them." >&2
+    exit 1
+  fi
+
+  # The label above is the cheap gate an agent in a jail can read; `ready` is the authority. §8:
+  # an issue can be labelled `agent-ready` by hand without ever passing the check, so claiming
+  # re-runs the five rules rather than trusting the label that stands for them — and `ready`
+  # takes the label back off when they no longer hold.
+  cmd_ready "$n" || {
+    echo "issues.sh claim: #$n no longer passes the Definition of Ready (above) — not claimable." >&2
+    exit 1
+  }
+
+  # One call, not two: an assignment that lands and a label removal that does not would leave the
+  # issue claimed *and* still in the agent queue, which is exactly the drift §8 names as this
+  # design's soft spot.
+  run gh issue edit --repo "$nwo" "$n" --add-assignee "$me" --remove-label agent-ready || exit 1
+  echo "claimed #$n as @$me; \`agent-ready\` dropped$(dry_tag)"
+
+  # Best-effort on purpose, and the one place in this file where a failed mutation is not fatal:
+  # the assignment and the label are already applied, so exiting nonzero here would tell the
+  # caller nothing happened. `board sync` is the command that fails outright without the scope.
+  board_set_status "$n" "$url" "In progress" \
+    || echo "  board Status not set (above) — the assignee and the label are applied; §5.2's other half is still the board's" >&2
+
+  # Not under --dry-run: the branch command is for an issue that is now assigned and out of the
+  # agent queue, and neither happened.
+  if [ "$dry" -eq 0 ]; then
+    line="$(stack_line "$title")"
+    if [ -n "$line" ]; then printf 'next:\n  %s\n' "$line"
+    else echo "next: #$n is not a MIP task row, so there is no stack line — branch from main as usual"
+    fi
+  fi
+}
+
+# mip_reference <MIP-NNNN> -> the milestone description that points at the MIP.
+# A MIP number with no file is refused: a typo would otherwise leave a milestone whose only piece
+# of provenance is a dangling reference.
+mip_reference() {
+  local n="${1#MIP-}" file
+  local -a files=()
+  case "$n" in
+    [0-9][0-9][0-9][0-9]) ;;
+    *) echo "issues.sh milestone new: --mip wants MIP-NNNN, got \"$1\"" >&2; return 1 ;;
+  esac
+  files=( "$root"/docs/MIPs/MIP-"$n"-*.md )
+  [ -e "${files[0]}" ] || { echo "issues.sh milestone new: no docs/MIPs/MIP-$n-*.md — is MIP-$n written?" >&2; return 1; }
+  file="$(basename "${files[0]}")"
+  printf 'Design: MIP-%s — docs/MIPs/%s\n' "$n" "$file"
+}
+
+cmd_milestone_new() {
+  [ $# -ge 1 ] || { echo "issues.sh milestone new: expects \"<name>\" [--mip MIP-NNNN]" >&2; usage >&2; exit 1; }
+  local name="$1" mip="" desc="" existing
+  local -a extra=()
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --mip)
+        [ $# -ge 2 ] || { echo "issues.sh milestone new: --mip needs MIP-NNNN" >&2; exit 1; }
+        mip="$2"; shift 2 ;;
+      *) echo "issues.sh milestone new: unknown argument: $1" >&2; usage >&2; exit 1 ;;
+    esac
+  done
+  [ -n "$name" ] || { echo "issues.sh milestone new: the name is empty" >&2; exit 1; }
+  if [ -n "$mip" ]; then
+    desc="$(mip_reference "$mip")" || exit 1
+    extra=(-f "description=$desc")
+  fi
+
+  require_gh
+  resolve_nwo
+  existing="$(milestone_number "$name")"
+  [ -z "$existing" ] || { echo "milestone \"$name\" already exists: #$existing"; return 0; }
+  run gh api --method POST "repos/$nwo/milestones" -f "title=$name" ${extra[@]+"${extra[@]}"}
+}
+
+cmd_board_sync() {
+  [ $# -eq 0 ] || { echo "issues.sh board sync: takes no arguments" >&2; usage >&2; exit 1; }
+  require_gh
+  resolve_nwo
+  board_require_write || exit 1
+  board_resolve || exit 1
+
+  local owner="${nwo%%/*}" limit=300 fields issues items plan n_open
+  issues="$(gh issue list --repo "$nwo" --state open --limit "$limit" --json number,url,assignees,labels </dev/null)"
+  n_open="$(jq 'length' <<<"$issues")"
+  # Same page-limit trap as `queue`: past the limit gh stops silently, and the issues it did not
+  # return read as already on the board.
+  if [ "$n_open" -ge "$limit" ]; then
+    echo "issues.sh: the repo has at least $limit open issues, this script's page limit — raise it before trusting this sync." >&2
+    exit 1
+  fi
+  fields="$(gh project field-list "$board_number" --owner "$owner" --format json --limit 100 </dev/null)"
+  items="$(board_items "$owner")" || exit 1
+  plan="$(board_plan "$items" "$issues" "$nwo")"
+  [ -n "$plan" ] || { echo "board: in sync ($n_open open issues)"; return 0; }
+
+  local action key status number rc=0 added=0 set_n=0 adopted=0 skipped=0 failed=0 pair fid oid missing_opts=""
+  while IFS=$'\t' read -r action key status number; do
+    [ "$action" = add ] || continue
+    rc=0
+    run gh project item-add "$board_number" --owner "$owner" --url "$key" || rc=$?
+    if [ "$rc" -eq 0 ]; then added=$((added + 1)); else failed=$((failed + 1)); fi
+  done <<<"$plan"
+
+  # A freshly added item has no id yet, so the Status pass works off a re-read rather than the
+  # plan that produced the adds.
+  if [ "$added" -gt 0 ] && [ "$dry" -eq 0 ]; then
+    items="$(board_items "$owner")" || exit 1
+    plan="$(board_plan "$items" "$issues" "$nwo")"
+  fi
+
+  while IFS=$'\t' read -r action key status number; do
+    [ "$action" = set ] || [ "$action" = adopt ] || continue
+    pair="$(board_status_option "$fields" "$status")"
+    if [ -z "$pair" ]; then
+      # Collected and reported once at the end, not per issue: on a board that has not had
+      # `board setup` run yet this is every issue in the repo saying the same thing. It is a
+      # missing prerequisite, not a failed write, and it is counted as its own thing.
+      missing_opts="$missing_opts$status"$'\n'
+      skipped=$((skipped + 1)); continue
+    fi
+    fid="${pair%%$'\t'*}"; oid="${pair##*$'\t'}"
+    # Named per card, not just counted: the first real run moves every issue off the auto-add
+    # default at once, and that is a lot of cards to discover after the fact.
+    if [ "$action" = adopt ]; then echo "  #$number  $board_autoadd_status → $status"
+    else echo "  #$number  (no Status) → $status"; fi
+    rc=0
+    run gh project item-edit --id "$key" --project-id "$board_id" --field-id "$fid" --single-select-option-id "$oid" || rc=$?
+    if [ "$rc" -ne 0 ]; then failed=$((failed + 1))
+    elif [ "$action" = adopt ]; then adopted=$((adopted + 1))
+    else set_n=$((set_n + 1)); fi
+  done <<<"$plan"
+
+  [ "$dry" -eq 0 ] || [ "$added" -eq 0 ] \
+    || echo "  the Status of the $added issue(s) added above is set on the real run, once they have item ids"
+  [ "$skipped" -eq 0 ] \
+    || board_status_missing "$(sort -u <<<"$missing_opts" | grep . | sed 's/.*/"&"/' | paste -sd', ' -)" "$skipped"
+  echo "board: $added added, $set_n set (no Status), $adopted adopted from $board_autoadd_status, $skipped skipped, $failed failed ($n_open open issues)$(dry_tag)"
+  [ "$failed" -eq 0 ] && [ "$skipped" -eq 0 ] || exit 1
+}
+
+# §5.2's Status values, in its order, `name:COLOR:description`. `Backlog` is not among them and is
+# deliberately not removed: `updateProjectV2Field` takes the **complete** option list, so an option
+# left out of it is deleted — and with it every item's Status. Four of these six already exist on
+# the live board; only Triage and Spec are added.
+board_status_wanted() {
+  cat <<'EOF'
+Triage:GRAY:Filed, not yet specified or sized (MIP-0063 §5.2)
+Spec:PINK:Being specified — the story body or its MIP is still being written
+Ready:BLUE:Passes the Definition of Ready
+In progress:YELLOW:Claimed and being worked on
+In review:PURPLE:A PR is open against it
+Done:ORANGE:Merged or closed
+EOF
+}
+
+# §5.2's four views: name, layout, filter. Two of that section's asks stay UI actions (introspected
+# 2026-09-28): **Agent queue**'s sort, because `sortByFields` is readable but neither view input
+# type carries a sort; and **Now**'s milestone filter, because no script knows which milestone is
+# "currently being pushed" — hence the empty filter below.
+board_views_wanted() {
+  printf '%s\t%s\t%s\n' \
+    "Triage"            TABLE_LAYOUT 'status:"Triage"' \
+    "Now"               BOARD_LAYOUT '' \
+    "Agent queue"       TABLE_LAYOUT 'label:"agent-ready"' \
+    "Good first issues" TABLE_LAYOUT 'label:"good first issue"'
+}
+
+# status_options_plan <existing-options-json> <wanted> -> the complete option list to send.
+# Every existing option is kept, with its id and its current colour and description; the missing
+# ones are appended. Appended, not interleaved, because reordering is cosmetic and rewriting an
+# option that is already there is not.
+status_options_plan() {
+  jq -n --argjson have "$1" --arg wanted "$2" '
+    ($wanted | split("\n") | map(select(length > 0) | split(":")
+      | {name: .[0], color: .[1], description: (.[2:] | join(":"))})) as $w
+    | ($have | map(.name)) as $names
+    | ($have | map({id, name, color, description} | if .id then . else del(.id) end))
+      + ($w | map(select(.name as $n | $names | index($n) | not)) | map({name, color, description}))'
+}
+
+# board_views_plan <existing-views-json> <wanted-tsv> -> one TSV action per line. No emitted
+# field is ever empty: `read` with IFS=tab collapses adjacent tabs, so an empty column in the
+# middle silently shifts every later one into the wrong variable.
+#   create  <name> <layout>
+#   filter  <view-id> <filter> <name>   — the view is there, unfiltered
+#   differs <name> <current> <wanted>   — reported, never applied
+# `filter` is what makes the two-phase create self-healing. A view is created unfiltered and
+# filtered by a second mutation (§5.2: `CreateProjectV2ViewInput` has no `filter`), so if that
+# second call fails, or the process dies between them, the view reads back with none — which is
+# this script's own unfinished work, not a maintainer's choice, and the next run finishes it.
+# A *different* filter is a maintainer's and is only reported. A view §5.2 deliberately leaves
+# unfiltered (Now) is never reported at all, whatever a human has since put on it.
+board_views_plan() {
+  jq -rn --argjson have "$1" --arg wanted "$2" '
+    ($have | map({key: (.name | ascii_downcase), value: .}) | from_entries) as $by
+    | $wanted | split("\n") | map(select(length > 0))[] | split("\t") as $w
+    | $by[$w[0] | ascii_downcase] as $v
+    | if $v == null then ["create", $w[0], $w[1]]
+      elif $w[2] == "" then empty
+      elif ($v.filter // "") == "" then ["filter", $v.id, $w[2], $w[0]]
+      elif $v.filter != $w[2] then ["differs", $w[0], $v.filter, $w[2]]
+      else empty end
+    | @tsv'
+}
+
+# board_view_filter <view-id> <filter> — the second half of the two-phase create.
+board_view_filter() {
+  run gh api graphql -f v="$1" -f f="$2" -f query='
+    mutation($v: ID!, $f: String!) { updateProjectV2View(input: {viewId: $v, filter: $f}) { projectV2View { id } } }'
+}
+
+# The two GraphQL reads `gh project` does not cover: field-list gives an option's id and name but
+# not its colour or description, and there is no `gh project view-list` at all. Both are written
+# against an **organization** owner, since §5.2's board moved to marola-dev with the repo; a
+# user-owned project needs `user(login:)` instead, and says so rather than failing inside jq.
+board_graphql_node() {   # <json> <jq-path> <owner> <what> -> the node, or a named error
+  local node
+  node="$(jq -c "$2 // empty" <<<"$1")"
+  [ -n "$node" ] || {
+    echo "issues.sh: could not read the board's $4 under the organization \"$3\" — this script queries organization(login:); a user-owned project needs user(login:) (MIP-0063 §5.2)." >&2
+    return 1
+  }
+  printf '%s\n' "$node"
+}
+
+board_status_field_json() {
+  local raw
+  raw="$(gh api graphql </dev/null -F n="$board_number" -f o="$1" -f query='
+    query($o: String!, $n: Int!) { organization(login: $o) { projectV2(number: $n) {
+      field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name color description } } } } } }')"
+  board_graphql_node "$raw" '.data.organization.projectV2.field' "$1" "Status field"
+}
+
+board_views_json() {
+  local limit=50 raw nodes n
+  raw="$(gh api graphql </dev/null -F n="$board_number" -F first="$limit" -f o="$1" -f query='
+    query($o: String!, $n: Int!, $first: Int!) { organization(login: $o) { projectV2(number: $n) {
+      views(first: $first) { nodes { id name filter } } } } }')"
+  nodes="$(board_graphql_node "$raw" '.data.organization.projectV2.views.nodes' "$1" "views")" || return 1
+  n="$(jq 'length' <<<"$nodes")"
+  [ "$n" -lt "$limit" ] || {
+    echo "issues.sh: the board has at least $limit views, this script's page limit — raise it before trusting the plan." >&2
+    return 1
+  }
+  printf '%s\n' "$nodes"
+}
+
+cmd_board_setup() {
+  [ $# -eq 0 ] || { echo "issues.sh board setup: takes no arguments" >&2; usage >&2; exit 1; }
+  require_gh
+  resolve_nwo
+  board_require_write || exit 1
+  board_resolve || exit 1
+
+  local owner="${nwo%%/*}" field_json fid have plan_json payload body n_have n_plan rc=0 failed=0
+  field_json="$(board_status_field_json "$owner")" || exit 1
+  fid="$(jq -r '.id // ""' <<<"$field_json")"
+  [ -n "$fid" ] || { echo "issues.sh board setup: the board's Status is not a single-select field (MIP-0063 §5.2)" >&2; exit 1; }
+  have="$(jq '[.options[]? | {id, name, color, description}]' <<<"$field_json")"
+  plan_json="$(status_options_plan "$have" "$(board_status_wanted)")"
+  n_have="$(jq 'length' <<<"$have")"
+  n_plan="$(jq 'length' <<<"$plan_json")"
+  if [ "$n_plan" -eq "$n_have" ]; then
+    echo "Status: all of §5.2's options are there ($n_have on the field)"
+  else
+    echo "Status: adding $(jq -r '.[] | select(has("id") | not) | .name' <<<"$plan_json" | paste -sd, -), keeping the $n_have already there"
+    # --input, not -f: the option list is a JSON array and `gh api -f` would send it as a string.
+    payload="$(jq -n --argjson o "$plan_json" --arg f "$fid" '{
+      query: "mutation($f: ID!, $options: [ProjectV2SingleSelectFieldOptionInput!]) { updateProjectV2Field(input: {fieldId: $f, singleSelectOptions: $options}) { projectV2Field { __typename } } }",
+      variables: {f: $f, options: $o}}')"
+    # Printed, not just pointed at. This mutation replaces the field's whole option list, so what
+    # is *in* the payload is the entire question — and `run` can only echo `--input <path>` for a
+    # temp file that is deleted a line later, which is unreadable exactly when it matters most.
+    jq . <<<"$payload" | sed 's/^/  /'
+    body="$(mktemp)"
+    printf '%s\n' "$payload" > "$body"
+    run gh api graphql --input "$body" || rc=$?
+    rm -f "$body"
+    [ "$rc" -eq 0 ] || failed=$((failed + 1))
+  fi
+
+  local views wanted plan action f2 f3 f4 created=0 filtered=0
+  wanted="$(board_views_wanted)"
+  views="$(board_views_json "$owner")" || exit 1
+  plan="$(board_views_plan "$views" "$wanted")"
+  if [ -z "$plan" ]; then
+    echo "views: §5.2's four are all there"
+  else
+    while IFS=$'\t' read -r action f2 f3 f4; do
+      case "$action" in
+        create)
+          rc=0
+          run gh api graphql -f p="$board_id" -f n="$f2" -f l="$f3" -f query='
+            mutation($p: ID!, $n: String!, $l: ProjectV2ViewLayout!) {
+              createProjectV2View(input: {projectId: $p, name: $n, layout: $l}) { projectV2View { id } } }' || rc=$?
+          if [ "$rc" -eq 0 ]; then created=$((created + 1)); else failed=$((failed + 1)); fi ;;
+        filter)
+          rc=0
+          echo "  view \"$f4\" has no filter — applying §5.2's [$f3]"
+          board_view_filter "$f2" "$f3" || rc=$?
+          if [ "$rc" -eq 0 ]; then filtered=$((filtered + 1)); else failed=$((failed + 1)); fi ;;
+        differs)
+          echo "  view \"$f2\" has the filter [$f3] — left alone; §5.2 wants [$f4]" >&2 ;;
+      esac
+    done <<<"$plan"
+
+    # A view has no id until it exists, so the filters for what was just created come from a
+    # re-read — which re-plans into the same `filter` action that heals a half-finished create
+    # from an earlier run. One path, not two.
+    if [ "$created" -gt 0 ] && [ "$dry" -eq 0 ]; then
+      views="$(board_views_json "$owner")" || exit 1
+      while IFS=$'\t' read -r action f2 f3 f4; do
+        [ "$action" = filter ] || continue
+        rc=0
+        board_view_filter "$f2" "$f3" || rc=$?
+        if [ "$rc" -eq 0 ]; then filtered=$((filtered + 1)); else failed=$((failed + 1)); fi
+      done <<<"$(board_views_plan "$views" "$wanted")"
+    elif [ "$created" -gt 0 ]; then
+      echo "  each new view's filter is a second updateProjectV2View on the real run, once it has an id"
+    fi
+    echo "views: $created created, $filtered filtered$(dry_tag)"
+  fi
+
+  echo "board setup: $failed failed$(dry_tag)"
+  [ "$failed" -eq 0 ] || exit 1
+}
+
+# phase_titles -> one "N<TAB>Phase N — <name><TAB>done|open" per line, read from ARCHITECTURE.md
+# §11 rather than copied here. The gate issues are named after the phases and deduped on that
+# name, so a second copy of the names is a second thing to keep true; the self-test pins the five
+# it must yield, which turns a rename in §11 into a failed build rather than a sixth gate issue.
+phase_titles() {
+  awk '/^## 11\./ { s = 1; next } s && /^## / { exit } s' "$root/docs/2-Building-marola/ARCHITECTURE.md" \
+    | sed -n 's/^[0-9]\{1,\}\. \*\*Phase \([0-9]\): \(.*\)\.\*\*.*/\1\t\2/p' \
+    | awk -F'\t' '{ done_ = ($2 ~ /\(done/) ? "done" : "open"
+                    name = $2; sub(/ *\([^)]*\)$/, "", name)
+                    printf "%s\tPhase %s — %s\t%s\n", $1, $1, name, done_ }'
+}
+
+cmd_board_gates() {
+  [ $# -eq 0 ] || { echo "issues.sh board gates: takes no arguments" >&2; usage >&2; exit 1; }
+  require_gh
+  resolve_nwo
+
+  local titles n_titles
+  titles="$(phase_titles)"
+  n_titles="$(grep -c . <<<"$titles" || true)"
+  [ "$n_titles" -eq 5 ] || {
+    echo "issues.sh board gates: ARCHITECTURE.md §11 yielded $n_titles phase titles, not 5 — refusing to file gate issues from a section this script no longer parses." >&2
+    exit 1
+  }
+
+  local repo_labels existing gate_limit=300 n_seen
+  repo_labels="$(gh label list --repo "$nwo" --limit 500 --json name </dev/null --jq '.[].name')"
+  # state=all: a gate that was filed and closed must not be filed again.
+  existing="$(gh issue list --repo "$nwo" --state all --limit "$gate_limit" --json title </dev/null --jq '.[].title')"
+  n_seen="$(grep -c . <<<"$existing" || true)"
+  # Past the limit gh stops silently, and an unseen gate reads as "never filed" — so a re-run
+  # files all five again.
+  [ "$n_seen" -lt "$gate_limit" ] || {
+    echo "issues.sh: the repo has at least $gate_limit issues, this script's page limit — raise it before trusting this dedup." >&2
+    exit 1
+  }
+
+  local num title marker body rc=0 created=0 skipped=0 failed=0
+  while IFS=$'\t' read -r num title marker; do
+    [ -n "$title" ] || continue
+    # `gh issue create --label` fails on a label the repo does not have, and .github/labels.yml is
+    # where these are defined (§5.2), so name the command that creates them rather than the error.
+    # --dry-run previews anyway: the point of the preview is to read it *before* applying the
+    # prerequisites, and the real run still refuses.
+    grep -qx "phase/$num" <<<"$repo_labels" || {
+      echo "issues.sh board gates: the repo has no \`phase/$num\` label — run \`just labels-sync\` first; it is in .github/labels.yml." >&2
+      [ "$dry" -eq 1 ] || exit 1
+    }
+    if grep -qxF "$title" <<<"$existing"; then
+      echo "gate already filed: $title"; skipped=$((skipped + 1)); continue
+    fi
+    body="$(printf 'Phase gate for phase %s of `docs/2-Building-marola/ARCHITECTURE.md` §11. It holds no work: every `phase/%s` issue is `blocked by` it, so closing this one unblocks the phase at once (MIP-0063 §5.3).\n\nWire an issue to it with `scripts/issues.sh deps add <issue> --blocked-by <this issue>`.\n' "$num" "$num")"
+    rc=0
+    run gh issue create --repo "$nwo" --title "$title" --label "phase/$num" --body "$body" || rc=$?
+    if [ "$rc" -eq 0 ]; then created=$((created + 1)); else failed=$((failed + 1)); fi
+  done <<<"$titles"
+
+  # A phase §11 already marks done gets a gate that is closed, not open: an open gate for a phase
+  # that finished before this script existed would block its issues forever. The number comes from
+  # a re-read because `run` swallows the create's output — that is the channel it echoes on.
+  if [ "$dry" -eq 0 ]; then
+    local open_gates n_gate
+    open_gates="$(gh issue list --repo "$nwo" --state open --limit "$gate_limit" --json number,title </dev/null \
+      --jq '.[] | "\(.number)\t\(.title)"')"
+    n_seen="$(grep -c . <<<"$open_gates" || true)"
+    [ "$n_seen" -lt "$gate_limit" ] || {
+      echo "issues.sh: the repo has at least $gate_limit open issues, this script's page limit — the gate to close may be past it." >&2
+      exit 1
+    }
+    while IFS=$'\t' read -r num title marker; do
+      [ "$marker" = done ] || continue
+      n_gate="$(awk -F'\t' -v t="$title" '$2 == t { print $1; exit }' <<<"$open_gates")"
+      [ -n "$n_gate" ] || continue
+      run gh issue close --repo "$nwo" "$n_gate" --reason completed || failed=$((failed + 1))
+    done <<<"$titles"
+  fi
+
+  echo "gates: $created filed, $skipped already there, $failed failed$(dry_tag)"
+  [ "$failed" -eq 0 ] || exit 1
+}
+
 dry=0
+# A summary line counts what *would* happen under --dry-run, and the past tense reads as if it had.
+dry_tag() { [ "$dry" -eq 0 ] || printf ' (--dry-run: nothing was written)'; }
+
 # %q, not "$*": a label description always contains spaces, so an unquoted echo prints a line
 # that looks copy-pasteable and isn't.
 run() {
@@ -248,9 +1391,103 @@ run() {
 
 # --- self-test ---
 
+# write_gh_stub <dir> — the `gh` the command tests run against, installed at <dir>/bin, reading
+# <dir>'s fixtures and logging every mutating call to $STUB_LOG. One stub, not one per section:
+# four copies of this core drifted apart, and what a section needs that another does not is a
+# fixture — `stateful` makes writes persist so run 2 sees run 1's work, `fail_id` names an issue
+# whose lookup 404s, and `bad_url` makes a create land but print no issue number.
+write_gh_stub() {
+  mkdir -p "$1/bin"
+  cat > "$1/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+cat >/dev/null          # a gh that reads stdin; `gh api --input -` really does
+jq_expr=""; path=""; prev=""; title=""; arg=""; method=""; issue_id=""; file=""; n=""
+for a in "$@"; do
+  case "$prev" in --jq) jq_expr="$a" ;; --title) title="$a" ;; --method) method="$a" ;; esac
+  case "$a" in repos/*) path="$a" ;; issue_id=*) issue_id="${a#issue_id=}" ;; esac
+  prev="$a"
+done
+log() { [ -z "${STUB_LOG-}" ] || printf '%s\n' "$*" >> "$STUB_LOG"; }
+case "$*" in
+  *"auth status"*) echo auth >> "$STUB_DIR/authlog"; exit 0 ;;
+  *"repo view"*)   echo "marola-dev/marola"; exit 0 ;;
+  *"api -i user"*)
+    # STUB_NOHDR models a fine-grained PAT: GitHub sends no X-OAuth-Scopes header at all.
+    if [ -n "${STUB_NOHDR-}" ]; then printf 'HTTP/2.0 200 OK\r\nServer: github.com\r\n\r\n{}\n'
+    else printf 'HTTP/2.0 200 OK\r\nX-Oauth-Scopes: repo, %s\r\n\r\n{}\n' "${STUB_SCOPES-}"; fi
+    exit 0 ;;
+  *"api user"*) echo "brunogbv"; exit 0 ;;
+  *"issue create"*)
+    log "$*"
+    [ ! -f "$STUB_DIR/bad_url" ] || { echo "https://github.com/marola-dev/marola/issues/"; exit 0; }
+    [ -f "$STUB_DIR/stateful" ] || exit 0
+    n=$(( $(jq 'length' "$STUB_DIR/issues-all.json") + 700 ))
+    jq --argjson n "$n" --arg t "$title" '. + [{number:$n,title:$t}]' "$STUB_DIR/issues-all.json" \
+      > "$STUB_DIR/w" && mv "$STUB_DIR/w" "$STUB_DIR/issues-all.json"
+    printf 'https://github.com/marola-dev/marola/issues/%s\n' "$n"; exit 0 ;;
+  *"label create"*|*"label edit"*|*"label delete"* \
+  |*"issue edit"*|*"issue close"*|*"project item-add"*|*"project item-edit"*) log "$*"; exit 0 ;;
+  *"--input"*)
+    for arg in "$@"; do case "$arg" in /*) file="$arg" ;; esac; done
+    log "graphql-input $(jq -r '[.variables.options[].name] | join(",")' "$file")"; exit 0 ;;
+  *createProjectV2View*)
+    for arg in "$@"; do case "$arg" in n=*) title="${arg#n=}" ;; l=*) method="${arg#l=}" ;; esac; done
+    log "create-view $title $method"; exit 0 ;;
+  *updateProjectV2View*)
+    for arg in "$@"; do case "$arg" in v=*) title="${arg#v=}" ;; f=*) method="${arg#f=}" ;; esac; done
+    log "set-filter $title $method"; exit 0 ;;
+  *"field(name:"*) file="$STUB_DIR/status-field${STUB_AFTER:+-after}.json" ;;
+  *"views(first"*)
+    # STUB_VIEWS pins the fixture; otherwise the re-read after a create has to see the new views,
+    # the way the real API would.
+    if [ -n "${STUB_VIEWS-}" ]; then file="$STUB_DIR/$STUB_VIEWS"
+    elif grep -q '^create-view' "${STUB_LOG:-/dev/null}" 2>/dev/null; then file="$STUB_DIR/views-after.json"
+    else file="$STUB_DIR/views.json"; fi ;;
+  *"project list"*)       file="$STUB_DIR/projects.json" ;;
+  *"project field-list"*) file="$STUB_DIR/${STUB_FIELDS:-fields.json}" ;;
+  *"project item-list"*)  file="$STUB_DIR/${STUB_ITEMS:-items.json}" ;;
+  *"label list"*)         file="$STUB_DIR/labels.json" ;;
+  *"issue list"*)
+    case "$*" in
+      *"--state all"*) file="$STUB_DIR/issues-all.json" ;;
+      *)               file="$STUB_DIR/issues-open.json" ;;
+    esac ;;
+  *)
+    case "$path" in
+      */milestones*) file="$STUB_DIR/milestones.json" ;;
+      */dependencies/blocked_by)
+        n="${path%/dependencies/blocked_by}"; n="${n##*/}"; file="$STUB_DIR/$n.deps.json"
+        [ ! -f "$STUB_DIR/stateful" ] || [ -f "$file" ] || printf '[]\n' > "$file"
+        if [ "$method" = POST ]; then
+          log "edge $n <- $(( issue_id - 5600000000 ))"
+          jq --argjson b "$(( issue_id - 5600000000 ))" '. + [{number:$b,state:"closed"}]' "$file" \
+            > "$STUB_DIR/w" && mv "$STUB_DIR/w" "$file"
+          exit 0
+        fi ;;
+      *)
+        n="${path##*/}"
+        [ "$n" != "$(cat "$STUB_DIR/fail_id" 2>/dev/null)" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        file="$STUB_DIR/$n.issue.json"
+        [ ! -f "$STUB_DIR/stateful" ] || [ -f "$file" ] \
+          || printf '{"number":%s,"id":%d}\n' "$n" "$(( 5600000000 + n ))" > "$file" ;;
+    esac ;;
+esac
+[ -f "$file" ] || { echo "stub: no fixture for ${path:-$*}" >&2; exit 1; }
+if [ -n "$jq_expr" ]; then jq -r "$jq_expr" "$file"; else cat "$file"; fi
+STUB
+  chmod +x "$1/bin/gh"
+  : > "$1/authlog"
+}
+
 self_test() {
-  local failed=0 tmp got want
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+  local failed=0 tmp got
+  tmp="$(mktemp -d)"
+  # EXIT, not RETURN: bash fires a RETURN trap when a *sourced file* finishes as well as when a
+  # function does, so `source scripts/lib/pr_labels.sh` below deleted $tmp half way through the
+  # run. The path is expanded into the trap body now, because this local is out of scope by the
+  # time EXIT fires.
+  # shellcheck disable=SC2064 # expanding now is the point: $tmp is local and gone by EXIT.
+  trap "rm -rf $(printf %q "$tmp")" EXIT
 
   check() {   # check <label> <got> <want>
     if [ "$2" = "$3" ]; then echo "ok: $1"; else echo "FAILED: $1" >&2; echo "  got:  $2" >&2; echo "  want: $3" >&2; failed=1; fi
@@ -388,6 +1625,25 @@ EOF
   dry=0
 
   echo
+  echo "-- labels sync ends on a summary, like every other subcommand --"
+  local lbl_dir="$tmp/labels" lbl_out
+  write_gh_stub "$lbl_dir"
+  printf '[{"name":"area/conditions","color":"000000","description":"Live sea/weather/tide data"},
+    {"name":"stale","color":"ffffff","description":"gone from the manifest"}]\n' > "$lbl_dir/labels.json"
+  printf -- '- name: "area/conditions"\n  color: "1d76db"\n  description: "Live sea/weather/tide data"\n\n- name: "area/map-site"\n  color: "0e8a16"\n  description: "The static map site"\n' \
+    > "$lbl_dir/m.yml"
+  lbl_out="$(PATH="$lbl_dir/bin:$PATH" STUB_DIR="$lbl_dir" STUB_LOG="$lbl_dir/log" nwo="" \
+    cmd_labels_sync --manifest "$lbl_dir/m.yml" 2>/dev/null)"
+  check "an applied plan says what it applied, not nothing at all" "$(tail -1 <<<"$lbl_out")" \
+    "labels: 2 of 2 actions applied, 1 orphaned (2 in the manifest)"
+  dry=1
+  lbl_out="$(PATH="$lbl_dir/bin:$PATH" STUB_DIR="$lbl_dir" STUB_LOG="$lbl_dir/log" nwo="" \
+    cmd_labels_sync --manifest "$lbl_dir/m.yml" 2>/dev/null)"
+  dry=0
+  check "and --dry-run says it applied nothing" "$(tail -1 <<<"$lbl_out")" \
+    "labels: 2 of 2 actions applied, 1 orphaned (2 in the manifest) (--dry-run: nothing was written)"
+
+  echo
   echo "-- the apply loop feeds the plan on stdin; run() must not pass it on --"
   # A `gh` that reads stdin would otherwise eat the rest of the plan: verified with a draining
   # stub, 1 of 39 edits ran and the script exited 0 reporting success.
@@ -395,6 +1651,27 @@ EOF
   got="$(printf 'plan-line-2\nplan-line-3\n' | { run cat >/dev/null; cat; })"
   check "run leaves the caller's stdin untouched" "$got" "plan-line-2
 plan-line-3"
+
+  echo
+  echo "-- the read calls must not eat the caller's stdin either --"
+  # run() protects the mutating calls; the reads (auth status, repo view, GET) are called
+  # directly. Task 5 drives `sub add`/`deps add` from a loop over the `depends on` column, so
+  # the caller's stdin is the loop's input — one gh child that reads it ends the loop early.
+  local stdin_dir="$tmp/stdin"
+  write_gh_stub "$stdin_dir"
+  printf '{"number":415,"id":5601728372}\n' > "$stdin_dir/415.issue.json"
+  printf '[{"number":414,"state":"closed","title":"stub"}]\n' > "$stdin_dir/415.deps.json"
+  got="$(printf 'row-2\nrow-3\n' | { PATH="$stdin_dir/bin:$PATH" STUB_DIR="$stdin_dir" nwo="" cmd_deps_list 415 >/dev/null; cat; })"
+  check "deps list leaves the caller's stdin untouched (auth status, repo view and the GET)" "$got" "row-2
+row-3"
+  got="$(printf 'row-2\nrow-3\n' | { PATH="$stdin_dir/bin:$PATH" STUB_DIR="$stdin_dir" nwo="marola-dev/marola" resolve_issue_id 415 >/dev/null; cat; })"
+  check "resolve_issue_id leaves the caller's stdin untouched" "$got" "row-2
+row-3"
+  if ( cmd_deps_add 428 --blocked-by 427 --blocked-by 426 ) >/dev/null 2>&1; then
+    echo "FAILED: a repeated --blocked-by was accepted; the last one silently won" >&2; failed=1
+  else
+    echo "ok: --blocked-by given twice is refused, not quietly overwritten"
+  fi
 
   echo
   echo "-- the parser survives a CRLF manifest and names a control character --"
@@ -435,6 +1712,927 @@ plan-line-3"
   [ "$failed" -eq 1 ] || echo "ok: all ${#PR_LABEL_TAXONOMY[@]} PR_LABEL_TAXONOMY entries match the manifest"
 
   echo
+  echo "-- the scratch dir survives the source above --"
+  # Keep these two after the only `source` in this function. A RETURN trap fires when a sourced
+  # file finishes, so cleaning up on RETURN silently removed $tmp here and the next section
+  # appended below failed for a reason that looked nothing like its cause.
+  check "no RETURN trap is installed; cleanup is on EXIT" "$(trap -p RETURN)" ""
+  if [ -d "$tmp" ]; then
+    echo "ok: the scratch dir is still there after sourcing a file"
+  else
+    echo "FAILED: the scratch dir was removed mid-run — something re-armed a RETURN trap" >&2; failed=1
+  fi
+
+  echo
+  echo "-- number -> database id --"
+  local payload='{"number":415,"id":3456789012,"title":"id-resolve-and-probe"}'
+  check "the id comes from the payload, not the number" "$(issue_id_of "$payload" 415)" "3456789012"
+  if issue_id_of "$payload" 414 >/dev/null 2>&1; then
+    echo "FAILED: a payload for a different issue was accepted; its id would attach the wrong issue" >&2; failed=1
+  else
+    echo "ok: a payload whose number is not the one asked for is refused"
+  fi
+  if issue_id_of '{"number":415}' 415 >/dev/null 2>&1; then
+    echo "FAILED: a payload carrying no id resolved to something" >&2; failed=1
+  else
+    echo "ok: a payload with no id is an error"
+  fi
+  if issue_id_of 'not json' 415 >/dev/null 2>&1; then
+    echo "FAILED: an unparseable payload resolved to something" >&2; failed=1
+  else
+    echo "ok: an unparseable payload is an error"
+  fi
+  if issue_id_of '{"number":423,"id":5605746769,"pull_request":{"html_url":"..."}}' 423 >/dev/null 2>&1; then
+    echo "FAILED: a pull request resolved to an id — GET /issues/{n} answers for PRs too, and they share the issue numbering" >&2; failed=1
+  else
+    echo "ok: a pull request is refused where an issue is required"
+  fi
+  check "an issue number reads with or without its #" "$(arg_number '#415' t)/$(arg_number 415 t)" "415/415"
+  if arg_number "4a5" t >/dev/null 2>&1; then
+    echo "FAILED: a non-numeric issue number was accepted" >&2; failed=1
+  else
+    echo "ok: a non-numeric issue number is an error"
+  fi
+
+  echo
+  echo "-- the id guard: the regression test for the trap itself --"
+  # An issue number where the API wants a database id addresses an unrelated repository's issue:
+  # refused, or attached to the wrong thing, and nothing downstream can tell which. The guard is
+  # the only thing standing there, so the guard is what gets tested.
+  if guard_id 415 "issue #415" 2>/dev/null; then
+    echo "FAILED: a 3-digit issue number passed the database-id guard" >&2; failed=1
+  else
+    echo "ok: a 3-digit value is refused where a database id is required"
+  fi
+  if guard_id 123456789 "issue #415" 2>/dev/null; then
+    echo "ok: a 9-digit database id passes"
+  else
+    echo "FAILED: a 9-digit database id was refused" >&2; failed=1
+  fi
+  local bad bad_ok=1
+  for bad in "" "12345678" "3456789012x" "#3456789012"; do
+    if guard_id "$bad" "boundary" 2>/dev/null; then
+      echo "FAILED: the guard accepted \"$bad\" as a database id" >&2; failed=1; bad_ok=0
+    fi
+  done
+  if [ "$bad_ok" -eq 1 ]; then echo "ok: empty, 8-digit, trailing-garbage and #-prefixed values are refused too"; fi
+  echo "-- issue forms parse, and their field labels are the exact headings §5.4 greps for --"
+  # No pyyaml on this host (AGENTS.md) and the repo avoids adding one. This hand-parses the
+  # indentation-based subset GitHub issue forms use — mappings, block/flow sequences, quoted and
+  # literal-block scalars — and errors on anything left over rather than silently truncating, the
+  # same trade manifest_json makes for labels.yml's fixed shape.
+  local form_dir="$root/.github/ISSUE_TEMPLATE" form_parser
+  form_parser="$tmp/parse_form.py"
+  cat > "$form_parser" <<'PYEOF'
+import json, re, sys
+
+def parse_yaml_subset(text):
+    entries = []
+    for raw in text.replace("\r\n", "\n").split("\n"):
+        stripped = raw.strip()
+        if stripped == "" or stripped.startswith("#"):
+            continue
+        entries.append([len(raw) - len(raw.lstrip(" ")), stripped])
+    pos = 0
+
+    def split_kv(s):
+        m = re.match(r'^([A-Za-z0-9_.-]+):\s*(.*)$', s)
+        if not m:
+            raise ValueError(f"cannot parse line: {s!r}")
+        return m.group(1), m.group(2).strip()
+
+    def scalar(v):
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            return v[1:-1]
+        if v.startswith("[") and v.endswith("]"):
+            return [scalar(x) for x in v[1:-1].split(",") if x.strip() != ""]
+        return v
+
+    def parse_block(min_indent):
+        nonlocal pos
+        if pos >= len(entries) or entries[pos][0] < min_indent:
+            return {}
+        return parse_sequence(entries[pos][0]) if entries[pos][1].startswith("- ") else parse_mapping(entries[pos][0])
+
+    def parse_mapping(indent):
+        nonlocal pos
+        result = {}
+        while pos < len(entries):
+            ind, content = entries[pos]
+            if ind != indent or content.startswith("- "):
+                break
+            key, val = split_kv(content)
+            pos += 1
+            if val == "":
+                result[key] = parse_block(indent + 2)
+            elif val in ("|", ">", "|-", ">-"):
+                while pos < len(entries) and entries[pos][0] > indent:
+                    pos += 1
+                result[key] = None
+            else:
+                result[key] = scalar(val)
+        return result
+
+    def parse_sequence(indent):
+        nonlocal pos
+        result = []
+        while pos < len(entries):
+            ind, content = entries[pos]
+            if ind != indent or not content.startswith("- "):
+                break
+            rest = content[2:]
+            if rest == "":
+                pos += 1
+                result.append(parse_block(indent + 2))
+            elif re.match(r'^[A-Za-z0-9_.-]+:(\s|$)', rest):
+                entries[pos] = [indent + 2, rest]
+                result.append(parse_mapping(indent + 2))
+            else:
+                pos += 1
+                result.append(scalar(rest))
+        return result
+
+    doc = parse_mapping(0)
+    if pos != len(entries):
+        raise ValueError(f"unparsed content at indent {entries[pos][0]}: {entries[pos][1]!r}")
+    return doc
+
+if __name__ == "__main__":
+    with open(sys.argv[1], encoding="utf-8") as f:
+        print(json.dumps(parse_yaml_subset(f.read())))
+PYEOF
+
+  local form_doc form_labels form_rc f
+  for f in bug_report.yml task.yml story.yml mip_proposal.yml config.yml; do
+    if form_doc="$(python3 "$form_parser" "$form_dir/$f" 2>&1)"; then form_rc=ok; else form_rc=fail; fi
+    check "$f parses" "$form_rc" "ok"
+  done
+
+  form_doc="$(python3 "$form_parser" "$form_dir/bug_report.yml" 2>/dev/null || echo '{}')"
+  form_labels="$(jq -r '[(.body // [])[].attributes.label] | map(select(. != null)) | join("|")' <<<"$form_doc")"
+  check "bug_report.yml field labels" "$form_labels" \
+    "What happened|What you expected instead|How to reproduce|Backend|Failing test|Relevant logs or output"
+  check "bug_report.yml's expected field renders as the DoR rule 1 heading for a bug" \
+    "### $(jq -r '(.body // [])[] | select(.id == "expected") | .attributes.label' <<<"$form_doc")" \
+    "### What you expected instead"
+  check "bug_report.yml's failing-test field renders as the DoR rule 2 heading for a bug" \
+    "### $(jq -r '(.body // [])[] | select(.id == "failing-test") | .attributes.label' <<<"$form_doc")" \
+    "### Failing test"
+
+  form_doc="$(python3 "$form_parser" "$form_dir/task.yml" 2>/dev/null || echo '{}')"
+  form_labels="$(jq -r '[(.body // [])[].attributes.label] | map(select(. != null)) | join("|")' <<<"$form_doc")"
+  check "task.yml field labels" "$form_labels" "What|Acceptance criteria|Named test|Size"
+  check "task.yml's acceptance-criteria field renders as the DoR rule 1 heading" \
+    "### $(jq -r '(.body // [])[] | select(.id == "acceptance-criteria") | .attributes.label' <<<"$form_doc")" \
+    "### Acceptance criteria"
+  check "task.yml's named-test field renders as the DoR rule 2 heading" \
+    "### $(jq -r '(.body // [])[] | select(.id == "named-test") | .attributes.label' <<<"$form_doc")" \
+    "### Named test"
+
+  form_doc="$(python3 "$form_parser" "$form_dir/story.yml" 2>/dev/null || echo '{}')"
+  form_labels="$(jq -r '[(.body // [])[].attributes.label] | map(select(. != null)) | join("|")' <<<"$form_doc")"
+  check "story.yml field labels" "$form_labels" \
+    "Problem|Proposed behaviour|Acceptance criteria|Named test|Out of scope|Deliverable"
+  check "story.yml's acceptance-criteria field renders as the DoR rule 1 heading" \
+    "### $(jq -r '(.body // [])[] | select(.id == "acceptance-criteria") | .attributes.label' <<<"$form_doc")" \
+    "### Acceptance criteria"
+  check "story.yml's named-test field renders as the DoR rule 2 heading" \
+    "### $(jq -r '(.body // [])[] | select(.id == "named-test") | .attributes.label' <<<"$form_doc")" \
+    "### Named test"
+
+  form_doc="$(python3 "$form_parser" "$form_dir/mip_proposal.yml" 2>/dev/null || echo '{}')"
+  form_labels="$(jq -r '[(.body // [])[].attributes.label] | map(select(. != null)) | join("|")' <<<"$form_doc")"
+  check "mip_proposal.yml field labels are unchanged" "$form_labels" "Title|Motivation|Sketch|Effort / gain guess"
+  if grep -q "MIP PR" "$form_dir/mip_proposal.yml" && grep -q "milestone" "$form_dir/mip_proposal.yml" \
+      && grep -q "tasks-to-issues" "$form_dir/mip_proposal.yml"; then
+    echo "ok: mip_proposal.yml states what happens next (MIP PR, milestone, tasks-to-issues)"
+  else
+    echo "FAILED: mip_proposal.yml is missing the MIP PR / milestone / tasks-to-issues next-steps text" >&2
+    failed=1
+  fi
+
+  form_doc="$(python3 "$form_parser" "$form_dir/config.yml" 2>/dev/null || echo '{}')"
+  check "config.yml still disables blank issues" "$(jq -r '.blank_issues_enabled' <<<"$form_doc")" "false"
+  check "config.yml points questions at Discussions" \
+    "$(jq -r '.contact_links[] | select(.name == "Ask a question") | .url' <<<"$form_doc")" \
+    "https://github.com/marola-dev/marola/discussions"
+
+  if [ -e "$form_dir/feature_request.yml" ]; then
+    echo "FAILED: feature_request.yml still exists — story.yml was meant to replace it" >&2; failed=1
+  else
+    echo "ok: feature_request.yml is gone, replaced by story.yml"
+  fi
+
+  echo
+  echo "-- the Definition of Ready: the five rules of §5.4 --"
+  local dor_body dor_bug_body dor_labels dor_got
+  dor_body="$(printf '### What\n\nx\n\n### Acceptance criteria\n\n- [ ] a\n\n### Named test\n\nFooSpec\n')"
+  dor_labels="$(printf 'area/dev-tooling\nlayer/infra\nsize/M\n')"
+
+  dor_case() {   # dor_case <label> <body> <labels> <blockers> <tier> <want-rc> <want-line>
+    local out rc=0
+    out="$(dor_rules "$2" "$3" "$4" "$5")" || rc=$?
+    check "$1 (exit)" "$rc" "$6"
+    case "$out" in
+      *"$7"*) echo "ok: $1" ;;
+      *) echo "FAILED: $1 — expected \"$7\" in:" >&2; sed 's/^/  /' <<<"$out" >&2; failed=1 ;;
+    esac
+  }
+
+  dor_case "all five hold" "$dor_body" "$dor_labels" "" standard 0 "✓ 5. no open blocked-by dependency"
+  dor_case "no acceptance criteria" "$(printf '### What\n\nx\n\n### Named test\n\nFooSpec\n')" \
+    "$dor_labels" "" standard 1 '✗ 1. acceptance criteria — no "### Acceptance criteria" section in the body'
+  dor_case "no named test" "$(printf '### Acceptance criteria\n\n- [ ] a\n')" \
+    "$dor_labels" "" standard 1 '✗ 2. named test — no "### Named test" section in the body'
+  dor_case "no area/* and no layer/*" "$dor_body" "$(printf 'size/M\n')" "" standard 1 \
+    "✗ 3. area/* and layer/* not set"
+  dor_case "no size/*" "$dor_body" "$(printf 'area/dev-tooling\nlayer/infra\n')" "" standard 1 \
+    "✗ 4. size/* label missing"
+  dor_case "an open blocked-by" "$dor_body" "$dor_labels" "#411" standard 1 \
+    "✗ 5. blocked by #411 (still open)"
+  dor_case "a field left blank is not an answered one" \
+    "$(printf '### Acceptance criteria\n\n- [ ] a\n\n### Named test\n\n_No response_\n')" \
+    "$dor_labels" "" standard 1 '✗ 2. named test — "### Named test" is empty'
+  # GitHub serves issue bodies with CRLF line endings, so an exact heading match has to strip it.
+  dor_case "a CRLF body still matches the headings" \
+    "$(printf '### Acceptance criteria\r\n\r\n- [ ] a\r\n\r\n### Named test\r\n\r\nFooSpec\r\n')" \
+    "$dor_labels" "" standard 0 "✓ 2. named test present"
+
+  echo
+  echo "-- the DoR is tier-aware (§5.4): a bug reads its own fields, a MIP proposal is not work --"
+  check "dor_tier: mip wins, whatever else is set" "$(dor_tier "$(printf 'mip\nbug\n')")" "mip"
+  check "dor_tier: bug" "$(dor_tier "$(printf 'bug\narea/safety\n')")" "bug"
+  check "dor_tier: anything else" "$(dor_tier "$(printf 'enhancement\n')")" "standard"
+  dor_bug_body="$(printf '### What happened\n\nx\n\n### What you expected instead\n\ny\n\n### Failing test\n\nFooSpec\n')"
+  dor_case "a bug with a filled-in Failing test passes" "$dor_bug_body" "$dor_labels" "" bug 0 \
+    "✓ 2. named test present"
+  dor_case "a bug whose Failing test was left blank does not" \
+    "$(printf '### What you expected instead\n\ny\n\n### Failing test\n\n_No response_\n')" \
+    "$dor_labels" "" bug 1 '✗ 2. named test — "### Failing test" is empty'
+  dor_case "the bug headings satisfy no other tier" "$dor_bug_body" "$dor_labels" "" standard 1 \
+    '✗ 1. acceptance criteria — no "### Acceptance criteria" section in the body'
+  # The contract the bug tier rests on, checked by construction rather than by two matching
+  # literals: renaming a field in bug_report.yml has to fail here, not leave dor_rules' h1/h2
+  # pointing at a heading that no longer renders while every literal in this file still agrees.
+  local dor_form
+  dor_form="$(python3 "$form_parser" "$form_dir/bug_report.yml" 2>/dev/null || echo '{}')"
+  dor_case "a bug body built from bug_report.yml's own field labels passes" \
+    "$(jq -r '[(.body // [])[] | select(.id == "expected" or .id == "failing-test")
+              | "### " + .attributes.label, "answered"] | join("\n\n")' <<<"$dor_form")" \
+    "$dor_labels" "" bug 0 "✓ 2. named test present"
+
+  # §3's block: the substring checks above prove the failing rule is named, not that the other
+  # four passed.
+  check "the report is §3's shape, one line per rule" \
+    "$(dor_rules "$dor_body" "$(printf 'area/dev-tooling\nlayer/infra\n')" "" standard || true)" \
+    "  ✓ 1. acceptance criteria present
+  ✓ 2. named test present
+  ✓ 3. area/* and layer/* labels set
+  ✗ 4. size/* label missing
+  ✓ 5. no open blocked-by dependency"
+
+  echo
+  echo "-- ready writes the agent-ready label both ways, and queue partitions what is left --"
+  local dor_dir="$tmp/dor" dor_log="$tmp/dor/edits.log"
+  write_gh_stub "$dor_dir"
+
+  cat > "$dor_dir/901.issue.json" <<'EOF'
+{"number":901,"id":5600000901,
+ "labels":[{"name":"area/map-site"},{"name":"layer/site"},{"name":"size/S"}],
+ "body":"### What\n\nx\n\n### Acceptance criteria\n\n- [ ] a\n\n### Named test\n\nFooSpec\n"}
+EOF
+  for dor_got in 903 904; do sed "s/901/$dor_got/g" "$dor_dir/901.issue.json" > "$dor_dir/$dor_got.issue.json"; done
+  cat > "$dor_dir/902.issue.json" <<'EOF'
+{"number":902,"id":5600000902,
+ "labels":[{"name":"agent-ready"},{"name":"area/dev-tooling"},{"name":"layer/infra"},{"name":"size/S"}],
+ "body":"### What\n\nx\n\n### Acceptance criteria\n\n- [ ] a\n"}
+EOF
+  cat > "$dor_dir/905.issue.json" <<'EOF'
+{"number":905,"id":5600000905,"labels":[{"name":"mip"}],"body":"### Motivation\n\nx\n"}
+EOF
+  cat > "$dor_dir/908.issue.json" <<'EOF'
+{"number":908,"id":5600000908,"labels":[{"name":"mip"},{"name":"agent-ready"}],
+ "body":"### Motivation\n\nx\n"}
+EOF
+  cat > "$dor_dir/906.issue.json" <<'EOF'
+{"number":906,"id":5600000906,
+ "labels":[{"name":"bug"},{"name":"area/safety"},{"name":"layer/core"},{"name":"size/S"}],
+ "body":"### What happened\n\nx\n\n### What you expected instead\n\ny\n\n### Failing test\n\nSafetyFooterSpec\n"}
+EOF
+  cat > "$dor_dir/907.issue.json" <<'EOF'
+{"number":907,"id":5600000907,
+ "labels":[{"name":"agent-ready"},{"name":"area/dev-tooling"},{"name":"layer/infra"},{"name":"size/M"}],
+ "body":"### Acceptance criteria\n\n- [ ] a\n\n### Named test\n\nFooSpec\n"}
+EOF
+  printf '[]\n' > "$dor_dir/901.deps.json"
+  cp "$dor_dir/901.deps.json" "$dor_dir/902.deps.json"
+  cp "$dor_dir/901.deps.json" "$dor_dir/906.deps.json"
+  cp "$dor_dir/901.deps.json" "$dor_dir/907.deps.json"
+  printf '[{"number":899,"state":"open"},{"number":898,"state":"closed"}]\n' > "$dor_dir/903.deps.json"
+  printf '[{"number":898,"state":"closed"}]\n' > "$dor_dir/904.deps.json"
+
+  dor_ready_case() {   # dor_ready_case <label> <issue> <want-rc> <want-line> <want-edit-call>
+    local out rc=0
+    : > "$dor_log"
+    out="$(PATH="$dor_dir/bin:$PATH" STUB_DIR="$dor_dir" STUB_LOG="$dor_log" nwo="" cmd_ready "$2" 2>&1)" || rc=$?
+    check "$1 (exit)" "$rc" "$3"
+    case "$out" in
+      *"$4"*) echo "ok: $1" ;;
+      *) echo "FAILED: $1 — expected \"$4\" in:" >&2; sed 's/^/  /' <<<"$out" >&2; failed=1 ;;
+    esac
+    check "$1 (label call)" "$(cat "$dor_log")" "$5"
+  }
+
+  dor_ready_case "an all-pass issue gains agent-ready" 901 0 "✓ #901 is agent-ready" \
+    "issue edit --repo marola-dev/marola 901 --add-label agent-ready"
+  dor_ready_case "a previously-ready issue that regressed loses it" 902 1 'label `agent-ready` removed' \
+    "issue edit --repo marola-dev/marola 902 --remove-label agent-ready"
+  dor_ready_case "an open blocked-by blocks, and is named" 903 1 "✗ 5. blocked by #899 (still open)" ""
+  dor_ready_case "a blocked-by that is closed does not block" 904 0 "✓ 5. no open blocked-by dependency" \
+    "issue edit --repo marola-dev/marola 904 --add-label agent-ready"
+  dor_ready_case "a MIP proposal is refused, and no dependency read is even made" 905 1 \
+    "it is a MIP proposal, and the DoR does not apply" ""
+  dor_ready_case "a hand-added agent-ready is taken off a MIP proposal too" 908 1 \
+    'label `agent-ready` removed' "issue edit --repo marola-dev/marola 908 --remove-label agent-ready"
+  dor_ready_case "a bug passes on its own two fields" 906 0 "✓ #906 is agent-ready" \
+    "issue edit --repo marola-dev/marola 906 --add-label agent-ready"
+  dor_ready_case "an already-ready issue is not re-labelled" 907 0 'label `agent-ready` already set' ""
+
+  dor_got="$(printf 'row-2\nrow-3\n' | { PATH="$dor_dir/bin:$PATH" STUB_DIR="$dor_dir" STUB_LOG="$dor_log" \
+    nwo="" cmd_ready 901 >/dev/null 2>&1; cat; })"
+  check "ready leaves the caller's stdin untouched" "$dor_got" "row-2
+row-3"
+
+  cat > "$dor_dir/issues-open.json" <<'EOF'
+[{"number":904,"title":"Cache Open-Meteo responses","assignees":[],"milestone":null,
+  "labels":[{"name":"agent-ready"},{"name":"area/conditions"},{"name":"layer/core"},{"name":"size/M"}]},
+ {"number":901,"title":"Add hreflang tags","assignees":[],"milestone":{"title":"Water quality on the map"},
+  "labels":[{"name":"agent-ready"},{"name":"area/map-site"},{"name":"layer/site"},{"name":"size/S"}]},
+ {"number":903,"title":"Waiting on an open one","assignees":[],"milestone":null,
+  "labels":[{"name":"area/dev-tooling"},{"name":"layer/infra"},{"name":"size/S"}]},
+ {"number":902,"title":"Still in triage","assignees":[],"milestone":null,"labels":[{"name":"bug"}]},
+ {"number":907,"title":"Someone is already on it","assignees":[{"login":"x"}],"milestone":null,
+  "labels":[{"name":"agent-ready"},{"name":"area/dev-tooling"},{"name":"layer/infra"},{"name":"size/S"}]}]
+EOF
+  dor_got="$(PATH="$dor_dir/bin:$PATH" STUB_DIR="$dor_dir" STUB_LOG="$dor_log" nwo="" cmd_queue)"
+  check "queue sorts size/S ahead of size/M" "$(head -1 <<<"$dor_got" | awk '{ print $1, $2 }')" "#901 size/S"
+  check "an assigned agent-ready issue is not in the queue" "$(grep -c '^#907' <<<"$dor_got" || true)" "0"
+  check "the footer partitions the unassigned open issues" "$(tail -1 <<<"$dor_got")" \
+    "      2 ready · 1 blocked · 1 in triage"
+  dor_got="$(PATH="$dor_dir/bin:$PATH" STUB_DIR="$dor_dir" STUB_LOG="$dor_log" nwo="" \
+    cmd_queue --milestone "Water quality on the map")"
+  check "--milestone narrows the queue and names itself" "$(tail -1 <<<"$dor_got")" \
+    "      1 ready · 0 blocked · 0 in triage   (milestone: Water quality on the map)"
+
+  echo
+  echo "-- tasks-to-issues projects the depends-on DAG, and a second run is a no-op --"
+  local t2i="$tmp/t2i" t2i_out t2i_file
+  # `stateful`: run 2 sees exactly what run 1 left behind, which is the only way to test
+  # idempotence — the property this command is for — without filing anything.
+  write_gh_stub "$t2i"
+  : > "$t2i/stateful"
+  printf '[{"number":3,"title":"Issue tracking standard live"}]\n' > "$t2i/milestones.json"
+  printf '[]\n' > "$t2i/issues-all.json"
+  : > "$t2i/log"
+  t2i_file="$t2i/MIP-0099.tasks.md"
+  # 6 depends on 1, not on 5, and 3 is a second root: the shape MIP-0034 and MIP-0031 have and a
+  # k-depends-on-k-1 reading of the table would destroy.
+  {
+    echo '| # | slug | delivers | tests (must exist before the PR) | depends on |'
+    echo '|---|---|---|---|---|'
+    printf '| 1 | a | d | t | – |\n| 2 | b | d | t | 1 |\n| 3 | c | d | t | – |\n'
+    printf '| 4 | d | d | t | 1, 3 |\n| 5 | e | d | t | 2 |\n| 6 | f | d | t | 1 |\n'
+  } > "$t2i_file"
+
+  dry=0
+  : > "$t2i/authlog"
+  gh_checked=0
+  t2i_out="$(PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_file" --milestone "Issue tracking standard live" 2>&1)" || failed=1
+  # One `gh auth status` for the whole run, not one per edge: cmd_deps_add is re-entered five
+  # times below and require_gh is what it re-enters.
+  check "the login is checked once, not once per edge" "$(grep -c . "$t2i/authlog")" "1"
+  check "run 1 files every row and wires every edge" "$(tail -1 <<<"$t2i_out")" \
+    "summary: 6 created, 0 already filed · 6 rows linked · 5 edges wired, 0 already wired, 0 pending"
+  check "the edges are the depends-on column's, not the row order's" "$(grep '^edge' "$t2i/log" | tr '\n' ' ')" \
+    "edge 701 <- 700 edge 703 <- 700 edge 703 <- 702 edge 704 <- 701 edge 705 <- 700 "
+  check "every row's # cell is now a link" \
+    "$(grep -c '^| \[[1-6]\](https://github.com/marola-dev/marola/issues/70[0-5]) |' "$t2i_file")" "6"
+
+  : > "$t2i/log"
+  t2i_out="$(PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_file" --milestone "Issue tracking standard live" 2>&1)" || failed=1
+  check "run 2 creates nothing, rewrites nothing and re-posts no edge" "$(tail -1 <<<"$t2i_out")" \
+    "summary: 0 created, 6 already filed · 0 rows linked · 0 edges wired, 5 already wired, 0 pending"
+  check "run 2 made no mutating call at all" "$(cat "$t2i/log")" ""
+  # The stub recorded each edge as closed on the way in: the 2026-09-27 probe found a dependency
+  # survives closing both issues, so a closed blocker is still an edge and must not be re-posted.
+  check "a closed blocker still counts as wired" "$(jq -r '.[0].state' "$t2i/701.deps.json")" "closed"
+
+  printf '[]\n' > "$t2i/issues-all.json"
+  rm -f "$t2i"/*.deps.json "$t2i"/*.issue.json
+  t2i_out="$(PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" dry=1 cmd_tasks_to_issues "$t2i_file" 2>&1)" || failed=1
+  check "--dry-run on an already-linked file creates nothing and leaves the rows alone" \
+    "$(tail -1 <<<"$t2i_out")" \
+    "summary: 6 created, 0 already filed · 0 rows linked · 0 edges wired, 0 already wired, 5 pending (--dry-run: nothing was written)"
+  check "--dry-run made no mutating call" "$(cat "$t2i/log")" ""
+  dry=0
+
+  if (PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_file" --milestone "No such milestone") >/dev/null 2>&1; then
+    echo "FAILED: a milestone that does not exist was accepted; the first create would have aborted part-way" >&2; failed=1
+  else
+    echo "ok: an unknown milestone is refused before anything is created"
+  fi
+
+  # A blocker whose lookup 404s (transferred, deleted, or a PR) reaches cmd_deps_add's
+  # resolve_issue_id. While that said `exit 1`, the first such edge left the shell from inside the
+  # loop's `if`: no summary, the later edges never attempted, and the failure tally unreachable.
+  local t2i_rc=0
+  : > "$t2i/log"
+  echo 700 > "$t2i/fail_id"
+  t2i_out="$(PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_file" 2>&1)" || t2i_rc=$?
+  rm -f "$t2i/fail_id"
+  check "an unresolvable blocker does not abort the loop — the other edges are still attempted" \
+    "$(grep -c '^edge ' "$t2i/log")" "2"
+  check "and the summary is still printed" "$(grep -c '^summary: ' <<<"$t2i_out")" "1"
+  check "and the run exits non-zero, naming how many actions failed" "$t2i_rc" "1"
+  case "$t2i_out" in
+    *"3 action(s) failed"*) echo "ok: every failed edge is counted, not just the first" ;;
+    *) echo "FAILED: the failure tally did not survive the loop:" >&2; sed 's/^/  /' <<<"$t2i_out" >&2; failed=1 ;;
+  esac
+  case "$t2i_out" in
+    *"no --milestone"*) echo "ok: a real run with no --milestone says so" ;;
+    *) echo "FAILED: a real run filed issues into no milestone silently" >&2; failed=1 ;;
+  esac
+
+  # The sibling failure: the create lands, the URL will not parse, and the issue now exists with
+  # nothing in the tasks file pointing at it.
+  local t2i_bad="$t2i/MIP-0098.tasks.md"
+  {
+    echo '| # | slug | delivers | tests (must exist before the PR) | depends on |'
+    echo '|---|---|---|---|---|'
+    printf '| 1 | a | d | t | – |\n| 2 | b | d | t | 1 |\n'
+  } > "$t2i_bad"
+  : > "$t2i/log"; : > "$t2i/bad_url"
+  t2i_rc=0
+  t2i_out="$(PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_bad" 2>&1)" || t2i_rc=$?
+  rm -f "$t2i/bad_url"
+  check "a create whose URL will not parse is counted, and the summary still prints" \
+    "$(grep -c '^summary: ' <<<"$t2i_out")" "1"
+  check "and the run says so rather than exiting 0 half way" "$t2i_rc" "1"
+
+  # #462: a `depends on` naming another MIP's task is an edge to that MIP's issue, found by title.
+  local t2i_x="$t2i/MIP-0065.tasks.md"
+  {
+    echo '| # | slug | delivers | tests (must exist before the PR) | depends on |'
+    echo '|---|---|---|---|---|'
+    printf '| 1 | a | d | t | 0064-T4 |\n| 2 | b | d | t | 1, 0064-T4 |\n'
+  } > "$t2i_x"
+  rm -f "$t2i"/*.deps.json "$t2i"/*.issue.json
+  printf '[{"number":458,"title":"0064-T4: kroki"}]\n' > "$t2i/issues-all.json"
+  : > "$t2i/log"
+  t2i_out="$(PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_x" 2>&1)" || failed=1
+  check "a cross-MIP token is wired to the issue whose title carries it" "$(grep '^edge' "$t2i/log" | tr '\n' ' ')" \
+    "edge 701 <- 458 edge 702 <- 701 edge 702 <- 458 "
+  : > "$t2i/log"
+  t2i_out="$(PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_x" 2>&1)" || failed=1
+  check "and a re-run adds no issue and no edge" "$(tail -1 <<<"$t2i_out")" \
+    "summary: 0 created, 2 already filed · 0 rows linked · 0 edges wired, 3 already wired, 0 pending"
+  printf '[]\n' > "$t2i/issues-all.json"
+  : > "$t2i/log"
+  sed -i 's/^| \[\([12]\)\]([^)]*) |/| \1 |/' "$t2i_x"
+  if (PATH="$t2i/bin:$PATH" STUB_DIR="$t2i" STUB_LOG="$t2i/log" nwo="" cmd_tasks_to_issues "$t2i_x") >/dev/null 2>&1; then
+    echo "FAILED: a cross-MIP token with no issue was accepted" >&2; failed=1
+  else
+    check "an unfiled cross-MIP token files nothing" "$(cat "$t2i/log")" ""
+  fi
+
+  echo "-- the board: scopes, the Status lookup and the sync plan (MIP-0063 §5.2) --"
+  check "read:project is not project" "$(has_scope "repo, read:project, workflow" project && echo yes || echo no)" "no"
+  check "project is" "$(has_scope "repo, project, workflow" project && echo yes || echo no)" "yes"
+
+  local board_fields board_items_json board_issues_json board_got
+  board_fields='{"fields":[{"id":"PVTF_t","name":"Title","type":"ProjectV2Field"},
+    {"id":"PVTSSF_s","name":"Status","type":"ProjectV2SingleSelectField",
+     "options":[{"id":"o-triage","name":"Triage"},{"id":"o-ready","name":"Ready"},{"id":"o-prog","name":"In progress"}]}]}'
+  check "a Status option resolves to its field id and its own id" \
+    "$(board_status_option "$board_fields" "In progress")" "$(printf 'PVTSSF_s\to-prog')"
+  # The live board still carries GitHub's template options (Backlog, not Triage/Spec). Sync has to
+  # name what is missing rather than fall back to the nearest, which would put issues somewhere
+  # §5.2 never defined and nobody is looking.
+  check "an option §5.2 names but the board does not have resolves to nothing" \
+    "$(board_status_option "$board_fields" "Spec")" ""
+
+  board_items_json='[
+    {"id":"I-910","status":"Backlog","content":{"number":910,"repository":"marola-dev/marola"}},
+    {"id":"I-951","content":{"number":951,"repository":"marola-dev/marola"}},
+    {"id":"I-952","status":"In review","content":{"number":952,"repository":"marola-dev/marola"}},
+    {"id":"I-903","content":{"number":903,"repository":"someone/else"}}]'
+  board_issues_json='[
+    {"number":910,"url":"u910","assignees":[],"labels":[{"name":"agent-ready"}]},
+    {"number":951,"url":"u951","assignees":[{"login":"x"}],"labels":[]},
+    {"number":952,"url":"u952","assignees":[],"labels":[]},
+    {"number":903,"url":"u903","assignees":[],"labels":[{"name":"agent-ready"}]},
+    {"number":950,"url":"u950","assignees":[],"labels":[]}]'
+  board_got="$(board_plan "$board_items_json" "$board_issues_json" "marola-dev/marola")"
+  # The three cases the maintainer decided between. `Backlog` is adoptable because the auto-add
+  # workflow wrote it, not a person; every other value is someone's choice. #952 is the one that
+  # would undo a maintainer's work: unassigned and unlabelled, so a Status derived from its state
+  # would drag it from In review back to Triage.
+  check "the auto-add default is adopted, once, from the issue's state" \
+    "$(grep '^adopt' <<<"$board_got" | cut -f2,3 | tr '\t' ' ')" "I-910 Ready"
+  check "an item with no Status at all is set, and counted apart from an adoption" \
+    "$(grep '^set' <<<"$board_got" | cut -f2,3 | tr '\t' ' ')" "I-951 In progress"
+  check "a Status a human chose is never touched" "$(grep -c 'I-952' <<<"$board_got" || true)" "0"
+  check "an unassigned agent-ready issue is Ready, not In progress" \
+    "$(grep 'u903' <<<"$board_got" | cut -f1,3 | tr '\t' ' ')" "add Ready"
+  check "an issue that is not on the board at all is an add" \
+    "$(grep 'u950' <<<"$board_got" | cut -f1,3 | tr '\t' ' ')" "add Triage"
+  check "board_item_id finds this repo's item" "$(board_item_id "$board_items_json" "marola-dev/marola" 910)" "I-910"
+  # One board can hold several repositories and issue numbers are only unique within one, so a
+  # match on the number alone would edit another repo's card.
+  check "board_item_id will not match another repository's item" \
+    "$(board_item_id "$board_items_json" "marola-dev/marola" 903)" ""
+
+  echo
+  echo "-- the gate names come from ARCHITECTURE.md §11, not from a second copy of them --"
+  check "five phases, with §11's own names" "$(phase_titles | cut -f2 | tr '\n' '|')" \
+    "Phase 0 — POC pipeline + six pluggable integrations|Phase 1 — Telegram bot|Phase 2 — Go live on a cloud backend, deliberately|Phase 3 — Deploy|Phase 4 — Harden & calibrate|"
+  check "§11 marks phase 0 done, so that gate is filed closed" \
+    "$(phase_titles | awk -F'\t' '$3 == "done" { print $1 }')" "0"
+
+  echo
+  echo "-- claim prints a branch command carrying the slug the tasks file actually has --"
+  check "a MIP task title yields its own stack line" \
+    "$(stack_line '0063-T6: claiming an issue, and the board itself')" \
+    "scripts/stack.sh start MIP-0063 6 board-and-claim"
+  # The `#` cell is a markdown link whose URL holds the issue number, so a slug read by taking
+  # every digit in the cell would match row 1 against "1414" and never find it.
+  check "the row is found by its number, not by the digits in its issue link" "$(tasks_slug 0063 1)" "taxonomy"
+  check "an ordinary issue title yields no stack line at all" "$(stack_line 'Cache Open-Meteo responses')" ""
+  check "a MIP with no tasks file still yields a line, with the slug left to fill in" \
+    "$(stack_line '9999-T2: something')" "scripts/stack.sh start MIP-9999 2 <slug>"
+
+  echo
+  echo "-- milestone new: --mip points at a MIP that exists, or not at all --"
+  check "--mip resolves to the MIP's own file" "$(mip_reference MIP-0063)" \
+    "Design: MIP-0063 — docs/MIPs/MIP-0063-github-issue-tracking-standard.md"
+  if mip_reference MIP-9999 >/dev/null 2>&1; then
+    echo "FAILED: a MIP number with no file was accepted — the milestone's one reference would dangle" >&2; failed=1
+  else
+    echo "ok: --mip with no matching docs/MIPs/MIP-NNNN-*.md is refused"
+  fi
+  if mip_reference 63 >/dev/null 2>&1; then
+    echo "FAILED: \"63\" was accepted where MIP-NNNN is required" >&2; failed=1
+  else
+    echo "ok: --mip wants the MIP-NNNN spelling"
+  fi
+
+  echo
+  echo "-- claim, board sync and the gates against a stubbed gh --"
+  local claim_dir="$tmp/claim" claim_log="$tmp/claim/calls.log" claim_got
+  write_gh_stub "$claim_dir"
+
+  cat > "$claim_dir/910.issue.json" <<'EOF'
+{"number":910,"id":5600000910,"state":"open","html_url":"u910",
+ "title":"0063-T6: claiming an issue, and the board itself","assignees":[],
+ "labels":[{"name":"agent-ready"},{"name":"area/dev-tooling"},{"name":"layer/infra"},{"name":"size/M"}],
+ "body":"### Acceptance criteria\n\n- [ ] a\n\n### Named test\n\nFooSpec\n"}
+EOF
+  cat > "$claim_dir/911.issue.json" <<'EOF'
+{"number":911,"id":5600000911,"state":"open","html_url":"u911","title":"Not ready yet","assignees":[],
+ "labels":[{"name":"area/dev-tooling"},{"name":"layer/infra"},{"name":"size/S"}],
+ "body":"### Acceptance criteria\n\n- [ ] a\n\n### Named test\n\nFooSpec\n"}
+EOF
+  cat > "$claim_dir/912.issue.json" <<'EOF'
+{"number":912,"id":5600000912,"state":"closed","html_url":"u912","title":"Already done","assignees":[],
+ "labels":[{"name":"agent-ready"}],"body":"### Named test\n\nFooSpec\n"}
+EOF
+  cat > "$claim_dir/913.issue.json" <<'EOF'
+{"number":913,"id":5600000913,"state":"open","html_url":"u913","title":"Someone is on it",
+ "assignees":[{"login":"someone-else"}],"labels":[{"name":"agent-ready"}],
+ "body":"### Acceptance criteria\n\n- [ ] a\n\n### Named test\n\nFooSpec\n"}
+EOF
+  cat > "$claim_dir/914.issue.json" <<'EOF'
+{"number":914,"id":5600000914,"state":"open","html_url":"u914","title":"Labelled by hand","assignees":[],
+ "labels":[{"name":"agent-ready"},{"name":"area/dev-tooling"},{"name":"layer/infra"},{"name":"size/S"}],
+ "body":"### Acceptance criteria\n\n- [ ] a\n"}
+EOF
+  printf '[]\n' > "$claim_dir/910.deps.json"
+  cp "$claim_dir/910.deps.json" "$claim_dir/913.deps.json"
+  cp "$claim_dir/910.deps.json" "$claim_dir/914.deps.json"
+  printf '{"projects":[{"number":7,"id":"PVT_test","title":"Marola"}]}\n' > "$claim_dir/projects.json"
+  printf '%s\n' "$board_fields" > "$claim_dir/fields.json"
+  # A board that has not had `board setup` run yet: no Triage option to adopt anything into.
+  jq '.fields |= map(if .name == "Status" then .options |= map(select(.name != "Triage")) else . end)' \
+    "$claim_dir/fields.json" > "$claim_dir/fields-sparse.json"
+  cat > "$claim_dir/items.json" <<'EOF'
+{"items":[{"id":"I-910","status":"Backlog","content":{"number":910,"repository":"marola-dev/marola"}},
+          {"id":"I-951","content":{"number":951,"repository":"marola-dev/marola"}},
+          {"id":"I-952","status":"In review","content":{"number":952,"repository":"marola-dev/marola"}},
+          {"id":"I-953","status":"Backlog","content":{"number":953,"repository":"marola-dev/marola"}}]}
+EOF
+  # After one sync: the adopted and the set card hold a real Status and #950 is on the board.
+  cat > "$claim_dir/items-synced.json" <<'EOF'
+{"items":[{"id":"I-910","status":"Ready","content":{"number":910,"repository":"marola-dev/marola"}},
+          {"id":"I-951","status":"In progress","content":{"number":951,"repository":"marola-dev/marola"}},
+          {"id":"I-952","status":"In review","content":{"number":952,"repository":"marola-dev/marola"}},
+          {"id":"I-953","status":"Triage","content":{"number":953,"repository":"marola-dev/marola"}},
+          {"id":"I-950","status":"Triage","content":{"number":950,"repository":"marola-dev/marola"}}]}
+EOF
+  printf '[{"name":"phase/0"},{"name":"phase/1"},{"name":"phase/2"},{"name":"phase/3"},{"name":"phase/4"}]\n' \
+    > "$claim_dir/labels.json"
+  printf '[{"title":"Phase 3 — Deploy"},{"title":"0063-T6: claiming an issue, and the board itself"}]\n' \
+    > "$claim_dir/issues-all.json"
+  cat > "$claim_dir/issues-open.json" <<'EOF'
+[{"number":910,"url":"u910","title":"0063-T6: claiming an issue, and the board itself",
+  "assignees":[],"labels":[{"name":"agent-ready"}]},
+ {"number":950,"url":"u950","title":"Phase 0 — POC pipeline + six pluggable integrations",
+  "assignees":[],"labels":[]},
+ {"number":951,"url":"u951","title":"Someone is on it","assignees":[{"login":"x"}],"labels":[]},
+ {"number":952,"url":"u952","title":"A maintainer moved this one","assignees":[],"labels":[]},
+ {"number":953,"url":"u953","title":"Still in triage","assignees":[],"labels":[]}]
+EOF
+
+  claim_case() {   # claim_case <label> <issue> <scopes> <want-rc> <want-output> <want-calls>
+    local out rc=0
+    : > "$claim_log"
+    out="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" STUB_SCOPES="$3" \
+      nwo="" cmd_claim "$2" 2>&1)" || rc=$?
+    check "$1 (exit)" "$rc" "$4"
+    case "$out" in
+      *"$5"*) echo "ok: $1" ;;
+      *) echo "FAILED: $1 — expected \"$5\" in:" >&2; sed 's/^/  /' <<<"$out" >&2; failed=1 ;;
+    esac
+    check "$1 (calls)" "$(cat "$claim_log")" "$6"
+  }
+
+  claim_case "a ready issue is assigned and loses the label, in one call" 910 project 0 \
+    "claimed #910 as @brunogbv" \
+    "issue edit --repo marola-dev/marola 910 --add-assignee brunogbv --remove-label agent-ready
+project item-edit --id I-910 --project-id PVT_test --field-id PVTSSF_s --single-select-option-id o-prog"
+  claim_case "and the board's Status goes to In progress with it" 910 project 0 \
+    "scripts/stack.sh start MIP-0063 6 board-and-claim" \
+    "issue edit --repo marola-dev/marola 910 --add-assignee brunogbv --remove-label agent-ready
+project item-edit --id I-910 --project-id PVT_test --field-id PVTSSF_s --single-select-option-id o-prog"
+  claim_case "an issue without agent-ready is refused before anything is read or written" 911 project 1 \
+    "is not \`agent-ready\`" ""
+  claim_case "a closed issue is refused" 912 project 1 "is closed, not open" ""
+  claim_case "an issue assigned to someone else is refused, not taken off them" 913 project 1 \
+    "already assigned to someone-else" ""
+  # §8: the label can be added by hand without the rules ever passing. `ready` is the authority,
+  # and it takes the label back off on the way through.
+  claim_case "a hand-added label does not get past the DoR, and is removed" 914 project 1 \
+    "no longer passes the Definition of Ready" \
+    "issue edit --repo marola-dev/marola 914 --remove-label agent-ready"
+  # The scope is a human's `gh auth refresh -s project` (§4.4). Until it lands, the half of §5.2's
+  # duplicated state that an agent can write must still be writable, or nothing is claimable.
+  claim_case "without \`project\` scope the claim still lands, and says the board did not" 910 read:project 0 \
+    "cannot write the board" \
+    "issue edit --repo marola-dev/marola 910 --add-assignee brunogbv --remove-label agent-ready"
+
+  claim_got="$(printf 'row-2\nrow-3\n' | { PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" \
+    STUB_LOG="$claim_log" STUB_SCOPES=project nwo="" cmd_claim 910 >/dev/null 2>&1; cat; })"
+  check "claim leaves the caller's stdin untouched" "$claim_got" "row-2
+row-3"
+
+  : > "$claim_log"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_SCOPES=project nwo="" cmd_board_sync 2>&1)"
+  check "sync adds, sets and adopts, counting each apart" "$(tail -1 <<<"$claim_got")" \
+    "board: 1 added, 1 set (no Status), 2 adopted from Backlog, 0 skipped, 0 failed (5 open issues)"
+  check "sync's calls" "$(cat "$claim_log")" \
+    "project item-add 7 --owner marola-dev --url u950
+project item-edit --id I-910 --project-id PVT_test --field-id PVTSSF_s --single-select-option-id o-ready
+project item-edit --id I-951 --project-id PVT_test --field-id PVTSSF_s --single-select-option-id o-prog
+project item-edit --id I-953 --project-id PVT_test --field-id PVTSSF_s --single-select-option-id o-triage"
+  check "the card a human moved is never in the calls" "$(grep -c 'I-952' "$claim_log" || true)" "0"
+  # The first real run moves every card off the auto-add default at once, so it names each one.
+  check "every change is named per issue, not just counted" \
+    "$(grep -E '^  #(910|951)' <<<"$claim_got" | tr -s ' ' | sed 's/^ //' | tr '\n' '|')" \
+    "#910 Backlog → Ready|#951 (no Status) → In progress|"
+  : > "$claim_log"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_ITEMS=items-synced.json STUB_SCOPES=project nwo="" cmd_board_sync 2>&1)"
+  check "a second run adopts nothing — the cards hold a real Status now" "$(tail -1 <<<"$claim_got")" \
+    "board: in sync (5 open issues)"
+  check "and writes nothing at all" "$(cat "$claim_log")" ""
+
+  # Sync before setup: the option an issue's state calls for does not exist yet. That is a missing
+  # prerequisite, not a failed write — counted apart, said once rather than once per issue, and
+  # still a nonzero exit because the work did not happen.
+  : > "$claim_log"
+  claim_got=""
+  claim_got="$( ( PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_FIELDS=fields-sparse.json STUB_SCOPES=project nwo="" cmd_board_sync ) 2>&1; echo "rc=$?")"
+  check "an option the board lacks is skipped, not failed" \
+    "$(grep '^board:' <<<"$claim_got")" \
+    "board: 1 added, 1 set (no Status), 1 adopted from Backlog, 1 skipped, 0 failed (5 open issues)"
+  check "and skipping is a nonzero exit — the sync did not do its job" "$(tail -1 <<<"$claim_got")" "rc=1"
+  check "the missing option is named once, not once per issue" \
+    "$(grep -c 'has no "Triage" option' <<<"$claim_got" || true)" "1"
+  # On stderr with the diagnostic, not only in the stdout summary: whoever is watching one is
+  # usually not watching the other.
+  check "and the diagnostic carries how many issues it left alone" \
+    "$(grep -c '1 issue(s) left alone' <<<"$claim_got" || true)" "1"
+  case "$claim_got" in
+    *"board setup\` first"*) echo "ok: and it names the command that creates it" ;;
+    *) echo "FAILED: the skip diagnostic does not point at board setup" >&2; failed=1 ;;
+  esac
+  : > "$claim_log"
+  claim_got=""
+  # A subshell, not just `|| …`: cmd_board_sync refuses with `exit`, which would take this
+  # self-test down with it rather than being caught.
+  ( PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" STUB_SCOPES=read:project \
+    nwo="" cmd_board_sync ) >/dev/null 2>&1 || claim_got=refused
+  check "sync fails outright without \`project\` scope, unlike claim" "$claim_got" "refused"
+  check "and writes nothing on the way" "$(cat "$claim_log")" ""
+  dry=1
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_SCOPES=read:project nwo="" cmd_board_sync 2>/dev/null | tail -1)"
+  dry=0
+  check "--dry-run still shows the plan without the scope — the reads only need read:project" \
+    "$claim_got" "board: 1 added, 1 set (no Status), 2 adopted from Backlog, 0 skipped, 0 failed (5 open issues) (--dry-run: nothing was written)"
+  check "and still writes nothing" "$(cat "$claim_log")" ""
+
+  : > "$claim_log"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    nwo="" cmd_board_gates 2>&1)"
+  check "the gate already filed is skipped, the other four are created" "$(tail -1 <<<"$claim_got")" \
+    "gates: 4 filed, 1 already there, 0 failed"
+  check "each gate carries its own phase label" "$(grep -c -- '--label phase/' "$claim_log" || true)" "4"
+  check "the phase §11 marks done is closed, not left blocking its own issues" \
+    "$(grep -c 'issue close --repo marola-dev/marola 950 --reason completed' "$claim_log" || true)" "1"
+  dry=1
+  : > "$claim_log"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    nwo="" cmd_board_gates 2>&1)"
+  dry=0
+  check "--dry-run files nothing at all" "$(cat "$claim_log")" ""
+  check "and still reports what it would file, saying it did not" "$(tail -1 <<<"$claim_got")" \
+    "gates: 4 filed, 1 already there, 0 failed (--dry-run: nothing was written)"
+
+  echo
+  echo "-- board setup: the Status options and the four views of §5.2 --"
+  local setup_have setup_plan setup_views
+  setup_have='[{"id":"o-backlog","name":"Backlog","color":"GREEN","description":"not started"},
+    {"id":"o-ready","name":"Ready","color":"BLUE","description":"ready"},
+    {"id":"o-prog","name":"In progress","color":"YELLOW","description":"wip"},
+    {"id":"o-rev","name":"In review","color":"PURPLE","description":"in review"},
+    {"id":"o-done","name":"Done","color":"ORANGE","description":"done"}]'
+  setup_plan="$(status_options_plan "$setup_have" "$(board_status_wanted)")"
+  # updateProjectV2Field replaces the whole option list, so an option missing from what is sent is
+  # deleted — together with the Status of every item carrying it. `Backlog` is not in §5.2 and 21
+  # items are already on this board.
+  check "every existing option survives the plan, with its own id" \
+    "$(jq -r '[.[] | select(.id != null) | .name] | join(",")' <<<"$setup_plan")" \
+    "Backlog,Ready,In progress,In review,Done"
+  check "only the two §5.2 options the board lacks are added, and with no id" \
+    "$(jq -r '[.[] | select(has("id") | not) | .name] | join(",")' <<<"$setup_plan")" "Triage,Spec"
+  check "an existing option is not added a second time" \
+    "$(jq -r '[.[] | select(.name == "In progress")] | length' <<<"$setup_plan")" "1"
+  check "a description containing a colon survives the parse" \
+    "$(jq -r '.[] | select(.name == "Triage") | .description' <<<"$setup_plan")" \
+    "Filed, not yet specified or sized (MIP-0063 §5.2)"
+  # Compared whole: `{id}` on an option that has none yields `"id": null`, which a length check
+  # never sees and updateProjectV2Field rejects.
+  check "nothing to add leaves the list exactly as it was" \
+    "$(status_options_plan "$setup_plan" "$(board_status_wanted)" | jq -S .)" "$(jq -S . <<<"$setup_plan")"
+
+  setup_views='[{"id":"V1","name":"Current iteration","filter":"iteration:@current"},
+    {"id":"V5","name":"In review","filter":"status:\"In review\""},
+    {"id":"V6","name":"My items","filter":"assignee:@me"}]'
+  check "all four of §5.2's views are missing from GitHub's template set" \
+    "$(board_views_plan "$setup_views" "$(board_views_wanted)" | cut -f1,2 | tr '\t' ' ' | tr '\n' '|')" \
+    "create Triage|create Now|create Agent queue|create Good first issues|"
+  # By id, and case-insensitively: a name match that is not is a second copy of a view on the
+  # live board. Grepping the plan for the template's *names* can never fail — it iterates $wanted.
+  check "an existing view is matched whatever its case, and the template's ids stay out of the plan" \
+    "$(board_views_plan '[{"id":"V1","name":"Current iteration","filter":"iteration:@current"},
+        {"id":"V9","name":"AGENT QUEUE","filter":null}]' "$(board_views_wanted)" \
+       | cut -f1,2 | tr '\t' ' ' | tr '\n' '|')" \
+    "create Triage|create Now|filter V9|create Good first issues|"
+  # A filter a maintainer narrowed by hand is theirs; setup reports the difference and stops there.
+  check "a view that already exists with another filter is reported, not overwritten" \
+    "$(board_views_plan '[{"id":"V9","name":"Agent queue","filter":"label:\"bug\""}]' \
+       "$(printf 'Agent queue\tTABLE_LAYOUT\tlabel:"agent-ready"')")" \
+    "$(printf 'differs\tAgent queue\tlabel:"bug"\tlabel:"agent-ready"')"
+  check "a view that already matches yields no line at all" \
+    "$(board_views_plan '[{"id":"V9","name":"Agent queue","filter":"label:\"agent-ready\""}]' \
+       "$(printf 'Agent queue\tTABLE_LAYOUT\tlabel:"agent-ready"')")" ""
+
+  # The half-finished two-phase create: the view exists because `createProjectV2View` landed, the
+  # `updateProjectV2View` that filters it did not. That is this script's own unfinished work, not a
+  # maintainer's choice, so the next run finishes it instead of reporting it forever.
+  check "a view this script created but never filtered is finished, not reported" \
+    "$(board_views_plan '[{"id":"V7","name":"Triage","filter":null}]' \
+       "$(printf 'Triage\tTABLE_LAYOUT\tstatus:"Triage"')")" \
+    "$(printf 'filter\tV7\tstatus:"Triage"\tTriage')"
+  check "an empty-string filter reads the same as a null one" \
+    "$(board_views_plan '[{"id":"V7","name":"Triage","filter":""}]' \
+       "$(printf 'Triage\tTABLE_LAYOUT\tstatus:"Triage"')" | cut -f1)" "filter"
+  # §5.2 leaves Now's milestone filter to a human, so whatever they put on it is right by
+  # definition and must never be reported as a difference.
+  check "the view §5.2 leaves unfiltered is never reported, whatever a human filtered it with" \
+    "$(board_views_plan '[{"id":"V8","name":"Now","filter":"milestone:\"x\""}]' \
+       "$(printf 'Now\tBOARD_LAYOUT\t')")" ""
+  # `read` with IFS=tab collapses adjacent tabs, so an empty column in the middle of a line shifts
+  # every later one — which is how a `differs` for an unfiltered view once printed the *wanted*
+  # filter as the current one and `[]` as the wanted.
+  check "no action line has an empty field for read to swallow" \
+    "$(board_views_plan '[{"id":"V7","name":"Triage","filter":null},{"id":"V9","name":"Agent queue","filter":"label:\"bug\""}]' \
+       "$(board_views_wanted)" | awk -F'\t' '{ for (i = 1; i <= NF; i++) if ($i == "") print "empty field " i " in: " $0 }')" ""
+
+  cat > "$claim_dir/status-field.json" <<'EOF'
+{"data":{"organization":{"projectV2":{"field":{"id":"PVTSSF_s","options":[
+  {"id":"o-backlog","name":"Backlog","color":"GREEN","description":"not started"},
+  {"id":"o-ready","name":"Ready","color":"BLUE","description":"ready"},
+  {"id":"o-prog","name":"In progress","color":"YELLOW","description":"wip"},
+  {"id":"o-rev","name":"In review","color":"PURPLE","description":"in review"},
+  {"id":"o-done","name":"Done","color":"ORANGE","description":"done"}]}}}}}
+EOF
+  jq '.data.organization.projectV2.field.options += [
+    {"id":"o-triage","name":"Triage","color":"GRAY","description":"t"},
+    {"id":"o-spec","name":"Spec","color":"PINK","description":"s"}]' \
+    "$claim_dir/status-field.json" > "$claim_dir/status-field-after.json"
+  cat > "$claim_dir/views.json" <<'EOF'
+{"data":{"organization":{"projectV2":{"views":{"nodes":[
+  {"id":"V1","name":"Current iteration","filter":"iteration:@current"},
+  {"id":"V5","name":"In review","filter":"status:\"In review\""},
+  {"id":"V6","name":"My items","filter":"assignee:@me"}]}}}}}
+EOF
+  # What a re-read right after `createProjectV2View` returns: the view exists, unfiltered. The
+  # filters arrive only with the second mutation, which is the window I1 is about.
+  jq '.data.organization.projectV2.views.nodes += [
+    {"id":"V7","name":"Triage","filter":null},
+    {"id":"V8","name":"Now","filter":null},
+    {"id":"V9","name":"Agent queue","filter":null},
+    {"id":"V10","name":"Good first issues","filter":null}]' \
+    "$claim_dir/views.json" > "$claim_dir/views-after.json"
+  jq '.data.organization.projectV2.views.nodes |= map(
+        if .name == "Triage" then .filter = "status:\"Triage\""
+        elif .name == "Agent queue" then .filter = "label:\"agent-ready\""
+        elif .name == "Good first issues" then .filter = "label:\"good first issue\""
+        else . end)' "$claim_dir/views-after.json" > "$claim_dir/views-done.json"
+
+  : > "$claim_log"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_SCOPES=project nwo="" cmd_board_setup 2>&1)"
+  check "setup sends the whole option list, existing ones first" "$(head -1 "$claim_log")" \
+    "graphql-input Backlog,Ready,In progress,In review,Done,Triage,Spec"
+  check "setup creates the four views with their layouts" \
+    "$(grep '^create-view' "$claim_log" | tr '\n' '|')" \
+    "create-view Triage TABLE_LAYOUT|create-view Now BOARD_LAYOUT|create-view Agent queue TABLE_LAYOUT|create-view Good first issues TABLE_LAYOUT|"
+  # CreateProjectV2ViewInput has no `filter` field (introspected 2026-09-28), so each filter is a
+  # second mutation against an id that only exists after the create.
+  check "and sets each filter afterwards, skipping the one §5.2 leaves to a human" \
+    "$(grep '^set-filter' "$claim_log" | tr '\n' '|')" \
+    "set-filter V7 status:\"Triage\"|set-filter V9 label:\"agent-ready\"|set-filter V10 label:\"good first issue\"|"
+  check "the whole option payload is printed, not just the path of a temp file that is deleted" \
+    "$(jq -r '.variables.options[-1].name' <<<"$(sed -n '/^  {/,/^  }/p' <<<"$claim_got")")" "Spec"
+  # The half-finished two-phase create, as its own run: the four views are there because
+  # `createProjectV2View` landed, unfiltered because `updateProjectV2View` did not. Nothing is
+  # created; the three filters are finished. Before I1 this state was classified `differs` and
+  # never healed.
+  : > "$claim_log"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_SCOPES=project STUB_AFTER=1 STUB_VIEWS=views-after.json nwo="" cmd_board_setup 2>&1)"
+  check "a half-finished create is healed, not created again" "$(grep -c '^create-view' "$claim_log" || true)" "0"
+  check "and its filter is applied on the next run" "$(grep '^set-filter' "$claim_log" | tr '\n' '|')" \
+    "set-filter V7 status:\"Triage\"|set-filter V9 label:\"agent-ready\"|set-filter V10 label:\"good first issue\"|"
+  case "$claim_got" in
+    *'view "Triage" has no filter — applying §5.2'*) echo "ok: and it says which view it is finishing" ;;
+    *) echo "FAILED: healing said nothing about the view it fixed:" >&2; sed 's/^/  /' <<<"$claim_got" >&2; failed=1 ;;
+  esac
+
+  : > "$claim_log"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_SCOPES=project STUB_AFTER=1 STUB_VIEWS=views-done.json nwo="" cmd_board_setup 2>&1)"
+  check "a second run changes nothing" "$(cat "$claim_log")" ""
+  check "and says so" "$(grep -c -E 'all of §5.2.s options are there|four are all there' <<<"$claim_got" || true)" "2"
+  claim_got=""
+  ( PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" STUB_SCOPES=read:project \
+    nwo="" cmd_board_setup ) >/dev/null 2>&1 || claim_got=refused
+  check "setup refuses without \`project\` scope, like sync" "$claim_got" "refused"
+
+  # A fine-grained PAT sends no X-OAuth-Scopes header, so token_scopes greps for something that is
+  # not there and exits nonzero with empty output. These cover that much and the branch it feeds.
+  # They do **not** cover the `|| true` at its call site: errexit is suppressed through every
+  # guarded caller, so the whole suite passes with that guard removed. Verified, not assumed.
+  local scope_rc=0
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_NOHDR=1 token_scopes || true)"
+  check "no scope header yields no scopes" "$claim_got" ""
+  ( PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_NOHDR=1 token_scopes >/dev/null ) || scope_rc=$?
+  check "and a nonzero status its callers must absorb" "$scope_rc" "1"
+  claim_got="$(PATH="$claim_dir/bin:$PATH" STUB_DIR="$claim_dir" STUB_LOG="$claim_log" \
+    STUB_NOHDR=1 "$root/scripts/issues.sh" --dry-run board setup 2>&1; echo "rc=$?")"
+  check "and such a token is unknown, not refused: setup runs to the end" \
+    "$(tail -1 <<<"$claim_got")" "rc=0"
+  case "$claim_got" in
+    *"no X-OAuth-Scopes header"*) echo "ok: and it says why it went ahead anyway" ;;
+    *) echo "FAILED: expected the fine-grained-PAT warning, got:" >&2; sed 's/^/  /' <<<"$claim_got" >&2; failed=1 ;;
+  esac
+
+  echo
   if [ "$failed" -eq 1 ]; then echo "issues.sh self-test: FAILED" >&2; return 1; fi
   echo "issues.sh self-test: ok"
 }
@@ -457,6 +2655,37 @@ case "${1:-}" in
     case "${2:-}" in
       sync) shift 2; cmd_labels_sync "$@" ;;
       *) echo "issues.sh labels: unknown subcommand: ${2:-<none>}" >&2; usage >&2; exit 1 ;;
+    esac
+    ;;
+  sub)
+    case "${2:-}" in
+      add) shift 2; cmd_sub_add "$@" ;;
+      *) echo "issues.sh sub: unknown subcommand: ${2:-<none>}" >&2; usage >&2; exit 1 ;;
+    esac
+    ;;
+  deps)
+    case "${2:-}" in
+      add) shift 2; cmd_deps_add "$@" ;;
+      list) shift 2; cmd_deps_list "$@" ;;
+      *) echo "issues.sh deps: unknown subcommand: ${2:-<none>}" >&2; usage >&2; exit 1 ;;
+    esac
+    ;;
+  ready) shift; cmd_ready "$@" ;;
+  queue) shift; cmd_queue "$@" ;;
+  tasks-to-issues) shift; cmd_tasks_to_issues "$@" ;;
+  claim) shift; cmd_claim "$@" ;;
+  milestone)
+    case "${2:-}" in
+      new) shift 2; cmd_milestone_new "$@" ;;
+      *) echo "issues.sh milestone: unknown subcommand: ${2:-<none>}" >&2; usage >&2; exit 1 ;;
+    esac
+    ;;
+  board)
+    case "${2:-}" in
+      sync) shift 2; cmd_board_sync "$@" ;;
+      setup) shift 2; cmd_board_setup "$@" ;;
+      gates) shift 2; cmd_board_gates "$@" ;;
+      *) echo "issues.sh board: unknown subcommand: ${2:-<none>}" >&2; usage >&2; exit 1 ;;
     esac
     ;;
   ""|*) usage >&2; exit 1 ;;

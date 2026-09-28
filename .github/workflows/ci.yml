@@ -27,6 +27,7 @@ jobs:
       docker: ${{ steps.filter.outputs.docker }}
       site: ${{ steps.filter.outputs.site }}
       justfile: ${{ steps.filter.outputs.justfile }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -51,6 +52,12 @@ jobs:
               - 'scripts/*.sh'      # gh-billing.sh's self-test lives in the same quality-other job
               - 'scripts/fixtures/**'
               - 'ruff.toml'
+              - '.github/ISSUE_TEMPLATE/**'  # issues.sh --self-test parses these forms
+              - '.github/labels.yml'          # and diffs this manifest
+              - 'docs/MIPs/*.tasks.md'        # tasks_issues.py --self-test parses all of them
+              - 'docs/2-Building-marola/ARCHITECTURE.md'        # §11's phase names are the gate-issue titles
+              - 'docs/MIPs/MIP-0063.tasks.md' # and its slug column is the branch `claim` prints
+              - 'mkdocs/**'          # mkdocs.sh --self-test asserts on mkdocs.yml's kroki keys
             site:
               - 'site/**'            # app.js/CSS/schema/fixtures → scripts/site_check.js (MIP-0009 task 2)
               - 'scripts/site_check.js'
@@ -60,8 +67,12 @@ jobs:
               - 'Dockerfile*'
               - 'docker-compose.yml'
               - '.dockerignore'
+              - 'mkdocs/**'          # its Dockerfile and compose stack are linted below too
             justfile:
               - 'justfile'
+            docs:
+              - 'docs/**'
+              - 'mkdocs/**'
 
   build-test:
     needs: changes
@@ -237,6 +248,20 @@ jobs:
   # Free, fast, and independent of the JVM build: Python lint/format for dspy/ and finetune/, a
   # linter for these workflow files themselves, and hadolint for the Dockerfiles — the same gates
   # as `just quality`.
+  # The docs build is strict, and since MIP-0064 task 3 it is also the step api-docs.yml publishes
+  # through. Without this gate a broken internal link merges green, then fails on main and takes
+  # the whole publish with it — scaladoc and pdoc included, since site.yml only deploys when that
+  # workflow succeeded. Runs the same script `just docs` does, so there is one build to keep green.
+  docs-build:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ${{ vars.CI_RUNNER || 'self-hosted' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: mkdocs --strict, in the Kroki container stack
+        run: scripts/mkdocs.sh
+
   quality-other:
     needs: changes
     if: needs.changes.outputs.python == 'true' || needs.changes.outputs.workflows == 'true' || needs.changes.outputs.docker == 'true' || needs.changes.outputs.site == 'true' || needs.changes.outputs.justfile == 'true'
@@ -301,12 +326,21 @@ jobs:
       - name: self-test — mip-stack (MIP-draft PR discovery ordering)
         if: needs.changes.outputs.python == 'true'
         run: scripts/mip-stack.sh --self-test
-      - name: self-test — mip_index_merge (docs/mips/README.md row conflict auto-resolve)
+      - name: "self-test — stack (restack's fork point when the base branch is gone)"
+        if: needs.changes.outputs.python == 'true'
+        run: scripts/stack.sh --self-test
+      - name: self-test — mip_index_merge (docs/MIPs/README.md row conflict auto-resolve)
         if: needs.changes.outputs.python == 'true'
         run: python3 scripts/lib/mip_index_merge.py --self-test
       - name: self-test — ocr-post (Open Code Review JSON → one advisory PR review, MIP-0060)
         if: needs.changes.outputs.python == 'true'
         run: python3 scripts/ocr-post.py --self-test
+      - name: self-test — issues.sh (label manifest, number→id resolution, issue forms, the DoR, MIP-0063)
+        if: needs.changes.outputs.python == 'true'
+        run: scripts/issues.sh --self-test
+      - name: "self-test — tasks_issues (MIP task table → issues: dedup, row link, the depends-on DAG)"
+        if: needs.changes.outputs.python == 'true'
+        run: python3 scripts/lib/tasks_issues.py --self-test
       - name: site harness — app.js against site/fixtures in a stub DOM (MIP-0009)
         if: needs.changes.outputs.site == 'true'
         run: |
@@ -327,8 +361,23 @@ jobs:
         uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
+      # A second step, not a second file: the action takes one dockerfile. `just quality-other`
+      # lints both in one command, and this is what keeps that claim true in CI.
+      - name: hadolint (mkdocs image)
+        if: needs.changes.outputs.docker == 'true'
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: mkdocs/Dockerfile
 
       # MIP-0010: every compose profile must still render — the mlflow profile included.
       - name: docker compose config (all profiles)
         if: needs.changes.outputs.docker == 'true'
         run: docker compose --profile mlflow --profile ollama --profile local config --quiet
+
+      # MIP-0064: the docs stack renders too, both overrides — a schema error in the serve one
+      # would otherwise surface for the first time on someone's `just docs-serve`.
+      - name: docker compose config (mkdocs stack)
+        if: needs.changes.outputs.docker == 'true'
+        run: |
+          docker compose -f mkdocs/docker-compose.yml -f mkdocs/docker-compose.build.yml config --quiet
+          docker compose -f mkdocs/docker-compose.yml -f mkdocs/docker-compose.serve.yml config --quiet

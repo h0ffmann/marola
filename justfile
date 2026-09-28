@@ -82,12 +82,14 @@ quality-other:
     python3 scripts/lib/uses_merge.py --self-test
     scripts/mip-stack.sh --self-test
     scripts/docs-mip-stack.sh --self-test
+    scripts/stack.sh --self-test
     python3 scripts/lib/mip_index_merge.py --self-test
     python3 scripts/ocr-post.py --self-test
     python3 scripts/mip_graph.py --self-test
     scripts/issues.sh --self-test
+    scripts/mkdocs.sh --self-test
+    python3 scripts/lib/tasks_issues.py --self-test
     python3 scripts/strip_external_scripts.py --self-test
-    python3 scripts/build_docs_index.py --self-test
     python3 scripts/mip_graph.py --check
     python3 finetune/train_lora.py --self-test
     python3 finetune/build_dataset.py --self-test
@@ -100,8 +102,8 @@ quality-other:
     node --check site/static/app.js
     node scripts/site_check.js
     actionlint
-    hadolint Dockerfile Dockerfile.local
-    if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then docker compose --profile mlflow --profile ollama --profile local config --quiet && echo "docker compose config: ok"; else echo "docker compose not installed — skipping compose config check"; fi
+    hadolint Dockerfile Dockerfile.local mkdocs/Dockerfile
+    if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then docker compose --profile mlflow --profile ollama --profile local config --quiet && docker compose -f mkdocs/docker-compose.yml -f mkdocs/docker-compose.build.yml config --quiet && docker compose -f mkdocs/docker-compose.yml -f mkdocs/docker-compose.serve.yml config --quiet && echo "docker compose config: ok"; else echo "docker compose not installed — skipping compose config check"; fi
 
 quality-fix:
     mkdir -p "$XDG_RUNTIME_DIR" && sbt scalafmtAll scalafixAll
@@ -119,7 +121,7 @@ watch:
     mkdir -p "$XDG_RUNTIME_DIR" && sbt "~compile"
 
 # ---------------------------------------------------------------------
-# Ollama — marola's default local LLM backend (LocalLlmClient, docs/RUN-LOCALLY.md)
+# Ollama — marola's default local LLM backend (LocalLlmClient, docs/1-Using-marola/RUN-LOCALLY.md)
 # ---------------------------------------------------------------------
 
 # Make sure an Ollama server is reachable, starting one if not.
@@ -163,7 +165,7 @@ e2e:
         'cli/testOnly marola.E2ESpec'
 
 # ---------------------------------------------------------------------
-# Knowledge (local RAG) and fine-tuning — MIP-0001, docs/FUTURE-WORK.md §9.1
+# Knowledge (local RAG) and fine-tuning — MIP-0001, docs/4-Research-and-plans/FUTURE-WORK.md §9.1
 # ---------------------------------------------------------------------
 
 # Ask knowledge/*.md a question — local RAG, Ollama embeds and answers. MIP-0001.
@@ -260,6 +262,20 @@ site-deploy target="github":
     esac
 
 # ---------------------------------------------------------------------
+# The docs site — MIP-0064: mkdocs-material + a self-hosted Kroki (mkdocs/)
+# ---------------------------------------------------------------------
+
+# Build docs/ into mkdocs/generated-docs. Needs a Docker or Podman daemon. Strict: a broken
+# internal link anywhere in docs/ fails this.
+docs:
+    scripts/mkdocs.sh
+
+# Serve the docs on http://localhost:8001/docs/ (8000 is `just site-serve`'s; the /docs/ path is
+# site_url's). The docs are baked into the image, so a doc edit needs a restart — no live reload.
+docs-serve:
+    scripts/mkdocs.sh --serve
+
+# ---------------------------------------------------------------------
 # Docker — MIP-0008: the CLI as an image (Dockerfile, docker-compose.yml)
 # ---------------------------------------------------------------------
 
@@ -324,10 +340,10 @@ context-mip mip:
     set -euo pipefail
     num="$(grep -oE '[0-9]{4}' <<<"{{ mip }}" | head -1)"
     if [ -z "$num" ]; then echo "usage: just context-mip MIP-NNNN" >&2; exit 1; fi
-    mip_file="$(ls docs/mips/MIP-"$num"-*.md 2>/dev/null | head -1)"
-    if [ -z "$mip_file" ]; then echo "no docs/mips/MIP-$num-*.md found" >&2; exit 1; fi
+    mip_file="$(ls docs/MIPs/MIP-"$num"-*.md 2>/dev/null | head -1)"
+    if [ -z "$mip_file" ]; then echo "no docs/MIPs/MIP-$num-*.md found" >&2; exit 1; fi
     include="\"README.md\", \"AGENTS.md\", \"PHILOSOPHY.md\", \"$mip_file\""
-    tasks_file="docs/mips/MIP-$num.tasks.md"
+    tasks_file="docs/MIPs/MIP-$num.tasks.md"
     [ -f "$tasks_file" ] && include="$include, \"$tasks_file\""
     mkdir -p .tmp
     out=".tmp/marola-context-mip-MIP-$num.md"
@@ -408,6 +424,38 @@ pr-labels-backfill *args:
 labels-sync *args:
     scripts/issues.sh labels sync {{ args }}
 
+# Run the five-rule Definition of Ready against one issue and add or remove `agent-ready`
+# accordingly, naming the rule that failed (MIP-0063 §5.4). --dry-run checks without labelling.
+issue-ready *args:
+    scripts/issues.sh ready {{ args }}
+
+# The unassigned `agent-ready` queue, sorted size then priority — the read an agent makes before
+# claiming anything (MIP-0063 §5.5). The ready/blocked/in-triage counts are derived from labels and
+# dependency edges, not read from the board's Status.
+issue-queue *args:
+    scripts/issues.sh queue {{ args }}
+
+# Project a MIP's task table into GitHub: an issue per row that has none, each row's `#` cell
+# linked to it, and one native `blocked by` edge per entry of the `depends on` column
+# (MIP-0063 §5.5). Idempotent; the milestone must already exist.
+tasks-to-issues *args:
+    scripts/issues.sh tasks-to-issues {{ args }}
+# Claim an `agent-ready` issue: re-check the Definition of Ready, assign it, drop the label, set
+# the board's Status, and print the branch command (MIP-0063 §5.5).
+issue-claim *args:
+    scripts/issues.sh claim {{ args }}
+
+# Create a deliverable milestone; --mip MIP-NNNN links the design it comes from (MIP-0063 §5.1).
+milestone-new *args:
+    scripts/issues.sh milestone new {{ args }}
+
+# Put every open issue on the board and set its Status from the issue's state — on the items with
+# no Status, and on those still carrying the auto-add default `Backlog`; any other value is
+# someone's choice and is left alone (MIP-0063 §5.2). Run `issues.sh board setup` first. Needs
+# `project` scope, which only a human can grant: gh auth refresh -s project (MIP-0063 §4.4).
+board-sync *args:
+    scripts/issues.sh board sync {{ args }}
+
 # scripts/stack.sh passthrough. MIP-0005.
 stack *args:
     scripts/stack.sh {{ args }}
@@ -455,7 +503,7 @@ alias ghas := runner-down
 mip-stack *args:
     scripts/mip-stack.sh {{ args }}
 
-# Regenerate docs/mips/README.md's dependency graph from each MIP's **Blocked by** row.
+# Regenerate docs/MIPs/README.md's dependency graph from each MIP's **Blocked by** row.
 mip-graph *args:
     python3 scripts/mip_graph.py {{ args }}
 

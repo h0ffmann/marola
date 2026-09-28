@@ -62,8 +62,8 @@ just site-build floripa && just site-serve                         # the map, lo
 ```
 
 No cloud account, no API key needed for any of the above. Full walkthrough with
-real output: [`docs/RUN-LOCALLY.md`](./docs/RUN-LOCALLY.md). Docker instead of Nix/sbt/Ollama
-([MIP-0008](./docs/mips/MIP-0008-docker-images-and-smoke-test.md)):
+real output: [`docs/1-Using-marola/RUN-LOCALLY.md`](./docs/1-Using-marola/RUN-LOCALLY.md). Docker instead of Nix/sbt/Ollama
+([MIP-0008](./docs/MIPs/MIP-0008-docker-images-and-smoke-test.md)):
 
 ```bash
 docker compose --profile ollama run --rm marola --summarize --lat -27.6733 --lon -48.4700
@@ -91,21 +91,21 @@ question. The same data, and much more, can help protect people and places:
 
 - 🌊 **Coastal hazard warnings.** Starting with *ressaca* (storm surf that erodes Brazil's
   beaches), with a hard "don't go in" when the sea gets dangerous
-  ([MIP-0062](./docs/mips/MIP-0062-ressaca-hazard.md)).
+  ([MIP-0062](./docs/MIPs/MIP-0062-ressaca-hazard.md)).
 - 🛰️ **Disaster forecasting with the same models the big agencies use.** marola's wave data
   already includes NOAA's **WAVEWATCH III** model (through NCEP's GFS-Wave). The plan is to show
   several models side by side, say openly when they disagree, and one day run a detailed wave
-  model for our own bays ([MIP-0051](./docs/mips/MIP-0051-wave-model-ensemble.md),
-  [MIP-0038](./docs/mips/MIP-0038-forecast-model-spread.md),
-  [MIP-0052](./docs/mips/MIP-0052-wave-model-compute.md)).
+  model for our own bays ([MIP-0051](./docs/MIPs/MIP-0051-wave-model-ensemble.md),
+  [MIP-0038](./docs/MIPs/MIP-0038-forecast-model-spread.md),
+  [MIP-0052](./docs/MIPs/MIP-0052-wave-model-compute.md)).
 - 🧪 **An open archive of Brazil's beach water quality**, versioned so anyone can study it
-  ([MIP-0056](./docs/mips/MIP-0056-oods-open-ocean-data-store.md)).
+  ([MIP-0056](./docs/MIPs/MIP-0056-oods-open-ocean-data-store.md)).
 - 🪼 **Reports from people at the beach.** Jellyfish, whales, and later photos of how the sea
   looks right now, so real observations can check and improve the forecasts.
 - 🏄 **The rest of the sea.** Surfing, diving and fishing, as new questions over the same data.
 
 These are ideas at different stages. Each one is written up as a public design doc (a "MIP") before
-it's built, so you can see exactly what is done and what is still a plan: [`docs/mips/`](./docs/mips/README.md).
+it's built, so you can see exactly what is done and what is still a plan: [`docs/MIPs/`](./docs/MIPs/README.md).
 
 ## How you can help (no coding needed)
 
@@ -124,10 +124,10 @@ marola is written in [Scala](https://www.scala-lang.org/), a programming languag
 [EPFL](https://www.epfl.ch/) (the Swiss Federal Institute of Technology in Lausanne) by Martin
 Odersky's lab, and maintained today by EPFL's [Scala Center](https://scala.epfl.ch/) together with
 VirtusLab and Akka (formerly Lightbend). marola uses Scala 3 with [Kyo](https://getkyo.io/) on the
-JVM, and a free local model through [Ollama](https://ollama.com/). The score and its safety veto are deterministic Scala; the model
-only interprets and phrases, and never overturns a veto. The reasoning behind that split:
+JVM, and a free local model through [Ollama](https://ollama.com/). The score and its safety veto
+are deterministic Scala; the model only interprets and phrases, and never overturns a veto. The reasoning behind that split:
 [`PHILOSOPHY.md`](./PHILOSOPHY.md). The map is rebuilt every 3 hours and on every relevant merge
-to `main` ([`site.yml`](./.github/workflows/site.yml), [MIP-0005](./docs/mips/MIP-0005-map-and-static-site.md)).
+to `main` ([`site.yml`](./.github/workflows/site.yml), [MIP-0005](./docs/MIPs/MIP-0005-map-and-static-site.md)).
 
 ```console
 $ just run -- --brief --lat -27.6733 --lon -48.4700   # real run, 7 Sep 2026; header lines and the last 2 of 6 beaches trimmed
@@ -142,7 +142,7 @@ water quality -> IMA/SC
 ### The integrations: local and free
 
 Every integration is a trait with a free local implementation. Full detail, including what's
-verified live vs. written-not-run: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) §5.
+verified live vs. written-not-run: [`docs/2-Building-marola/ARCHITECTURE.md`](./docs/2-Building-marola/ARCHITECTURE.md) §5.
 
 | Capability | Implementation | Switch |
 |---|---|---|
@@ -154,22 +154,22 @@ verified live vs. written-not-run: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.
 | Observability | Off, or OTLP traces into local MLflow | `MAROLA_TRACES=off\|mlflow` |
 
 **Next:** the rest of the sea (surf, diving, fishing) as new scoring functions over the same data;
-roadmap: [`docs/mips/README.md`](./docs/mips/README.md), [`docs/FUTURE-WORK.md`](./docs/FUTURE-WORK.md) §1.
+roadmap: [`docs/MIPs/README.md`](./docs/MIPs/README.md), [`docs/4-Research-and-plans/FUTURE-WORK.md`](./docs/4-Research-and-plans/FUTURE-WORK.md) §1.
 
 ### Documentation
 
-**Start here:** [`docs/RUN-LOCALLY.md`](./docs/RUN-LOCALLY.md). Everything else lives under `docs/`:
+**Start here:** [`docs/1-Using-marola/RUN-LOCALLY.md`](./docs/1-Using-marola/RUN-LOCALLY.md). Everything else lives under `docs/`:
 
 | Doc | What it covers |
 |---|---|
 | [`PHILOSOPHY.md`](./PHILOSOPHY.md) | Why marola is built the way it is: the three pillars, why agents, why Scala/Nix/`just` |
-| [`ARCHITECTURE.md`](./docs/ARCHITECTURE.md) | The pipeline, its local integrations, verified-live vs. written-not-run |
-| [`RUN-LOCALLY.md`](./docs/RUN-LOCALLY.md) | Run it now with Ollama, no cloud account needed |
-| [`FUTURE-WORK.md`](./docs/FUTURE-WORK.md) / [`EFFECTS-MAP.md`](./docs/EFFECTS-MAP.md) | Design sketches, reviewed-not-adopted libraries; a Scala/FP-purity review |
-| [`SKILLS.md`](./docs/SKILLS.md) / [`AGENT-SKILLS.md`](./docs/AGENT-SKILLS.md) | A skills roadmap for humans; which Claude Code skills to use here |
-| [`AGENT-FRAMEWORKS-SURVEY.md`](./docs/AGENT-FRAMEWORKS-SURVEY.md) | Multi-agent frameworks: Python ideas, JVM/Scala libraries, where Apache Pekko fits |
-| [`benchmarks/`](./docs/benchmarks/2026-09-05.md) / [`mips/`](./docs/mips/README.md) | Kept benchmark runs; numbered design docs written before a feature is built |
-| [`FABLE_REVIEW.md`](./docs/FABLE_REVIEW.md) / [`DEV-FLOW.md`](./docs/DEV-FLOW.md) | Code review at the initial import; the dev loop end to end, MIP → PRs → merge |
+| [`ARCHITECTURE.md`](./docs/2-Building-marola/ARCHITECTURE.md) | The pipeline, its local integrations, verified-live vs. written-not-run |
+| [`RUN-LOCALLY.md`](./docs/1-Using-marola/RUN-LOCALLY.md) | Run it now with Ollama, no cloud account needed |
+| [`FUTURE-WORK.md`](./docs/4-Research-and-plans/FUTURE-WORK.md) / [`EFFECTS-MAP.md`](./docs/2-Building-marola/EFFECTS-MAP.md) | Design sketches, reviewed-not-adopted libraries; a Scala/FP-purity review |
+| [`SKILLS.md`](./docs/4-Research-and-plans/SKILLS.md) / [`AGENT-SKILLS.md`](./docs/3-Working-on-the-repo/AGENT-SKILLS.md) | A skills roadmap for humans; which Claude Code skills to use here |
+| [`AGENT-FRAMEWORKS-SURVEY.md`](./docs/4-Research-and-plans/AGENT-FRAMEWORKS-SURVEY.md) | Multi-agent frameworks: Python ideas, JVM/Scala libraries, where Apache Pekko fits |
+| [`benchmarks/`](./docs/benchmarks/2026-09-05.md) / [`mips/`](./docs/MIPs/README.md) | Kept benchmark runs; numbered design docs written before a feature is built |
+| [`FABLE_REVIEW.md`](./docs/4-Research-and-plans/FABLE_REVIEW.md) / [`DEV-FLOW.md`](./docs/3-Working-on-the-repo/DEV-FLOW.md) | Code review at the initial import; the dev loop end to end, MIP → PRs → merge |
 
 If you're an AI coding agent picking this repo up: read [`AGENTS.md`](./AGENTS.md) first.
 
@@ -187,17 +187,17 @@ The `tiny` preset is SmolLM2-360M, a **pipeline proof, not a quality bar**, exac
 [`finetune/README.md`](./finetune/README.md) frames it. On a real swim summary it ignores the
 facts it is given and invents its own; `marola-llama3.2` (Llama 3.2 with marola's persona, built
 locally by `just finetune-model`) produces a usable answer from the same input. Scaling it is
-[`MIP-0048`](./docs/mips/MIP-0048-scaling-marola-sea.md).
+[`MIP-0048`](./docs/MIPs/MIP-0048-scaling-marola-sea.md).
 
 | Doc | What it covers |
 |---|---|
 | [`finetune/README.md`](./finetune/README.md) | The two tiers, what each costs, what is actually run |
-| [`MIP-0025`](./docs/mips/README.md) | The chain: dataset → SFT → DPO → merge → GGUF → publish |
-| [`MIP-0048`](./docs/mips/MIP-0048-scaling-marola-sea.md) | Which model, which checkpoint, which hardware, the data ceiling |
+| [`MIP-0025`](./docs/MIPs/README.md) | The chain: dataset → SFT → DPO → merge → GGUF → publish |
+| [`MIP-0048`](./docs/MIPs/MIP-0048-scaling-marola-sea.md) | Which model, which checkpoint, which hardware, the data ceiling |
 
 ## Contributing
 
-Small PRs, one topic each; non-trivial changes start as a MIP under `docs/mips/`; every commit
+Small PRs, one topic each; non-trivial changes start as a MIP under `docs/MIPs/`; every commit
 carries the `Co-Authored-By: Claude <noreply@anthropic.com>` trailer and every PR body ends with a
 `Cost:` line. AI agents are first-class contributors here and follow `AGENTS.md` like anyone else.
 Full guide: [`CONTRIBUTING.md`](./CONTRIBUTING.md). Please also read the
