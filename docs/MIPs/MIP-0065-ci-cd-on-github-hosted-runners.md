@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Partially implemented (tasks 1–2 of 4 — #481 #482; workflow-fixes, ci-cd-doc to go) — `Tasks: docs/MIPs/MIP-0065.tasks.md` |
+| **Status** | Implemented — PRs #481 (hosted-runners) → #482 (docker-on) → #495 (workflow-fixes) → #497 (ci-cd-doc); tasks: [`MIP-0065.tasks.md`](./MIP-0065.tasks.md). Open: the GHCR package is still private (§4.3), scala-steward's token awaits approval (#496), §7 step 7's week with the desktop off |
 | **Author** | Claude (Opus 5), with Bruno |
 | **Created** | 2026-09-28 |
 | **Phase** | 3 — the existing deploys (Pages, GHCR images) move runner; no Phase 1 or Phase 2 prerequisite, no cloud spend. The bot's own deploy (§5.7) is Phase 2 and out of scope |
@@ -13,7 +13,7 @@
 | **Depends on** | MIP-0064, all four tasks (#455–#458): it edits the same `api-docs.yml` and `quality-other` job, and this MIP re-verifies its mkdocs/Kroki build on the hosted runner. A small prerequisite fix to `scripts/lib/tasks_issues.py` (cross-MIP `depends on` tokens, §5.6) must merge before this MIP's tasks are projected into issues. No Phase 1 gate, no paid resource |
 | **Blocked by** | 0064 |
 | **Risk** | The first cold run on `ubuntu-latest` surfaces an environment assumption nobody wrote down (a tool on the desktop's `PATH`, a warm cache, a Docker login), and the move stalls half done — some jobs hosted, some not, both tool paths still alive |
-| **Cost so far** | — |
+| **Cost so far** | ~$29.69 — drafting #461 + #470 $17.71, tasks #481 $2.79, #482 $2.72, #495 $2.51, ci-cd-doc $3.96 (summed `Cost:` trailers; #464's prerequisite fix is its own issue) |
 
 ## 1. Summary
 
@@ -56,7 +56,7 @@ after:  PR from a fork → waits for approval → runs on ubuntu-latest
           workflow_runners: ci.yml:21 targets self-hosted — only marola-sea-publish.yml may
 ```
 
-`docs/CI-CD.md` exists: one row per workflow — trigger, runner, what it gates or deploys, the
+`docs/3-Working-on-the-repo/CI-CD.md` exists: one row per workflow — trigger, runner, what it gates or deploys, the
 secrets and variables it reads, how to run it by hand.
 
 ## 4. Data sources and dependencies reviewed
@@ -164,7 +164,7 @@ lint shell where it carries them; the marketplace actions stay only for any it d
 ### 5.5 The broken workflows
 
 - `ci-short-circuit-pr-close`: `gh run cancel --repo "$GITHUB_REPOSITORY" "$id"`.
-- `ghcr-retention`: deleted (§4.4), with its row in `docs/CI-CD.md` saying why.
+- `ghcr-retention`: deleted (§4.4), with its row in `docs/3-Working-on-the-repo/CI-CD.md` saying why.
 - `scala-steward`: expected to recover on the hosted image; if not, its own issue.
 - `site-health`: not broken — it reports IMA/SC with no Campeche sampling point and INEMA/BA
   returning nothing. Out of scope; filed separately as a data issue.
@@ -190,7 +190,7 @@ Tasks, each a PR in the stack:
    MIP-0064 §5.4's "the runners are self-hosted with Docker on the host". Depends on `0064-T4`.
 2. **docker-on** — §5.4. Depends on 1.
 3. **workflow-fixes** — §5.5. Depends on 1.
-4. **ci-cd-doc** — `docs/CI-CD.md`, its rows in `AGENTS.md` and `docs/index.md` (MIP-0064 renames
+4. **ci-cd-doc** — `docs/3-Working-on-the-repo/CI-CD.md`, its rows in `AGENTS.md` and `docs/index.md` (MIP-0064 renames
    `docs/README.md`), `FUTURE-WORK.md` §7.2 reduced to a pointer; passes MIP-0064's `--strict`
    build. Depends on 2 and 3.
 

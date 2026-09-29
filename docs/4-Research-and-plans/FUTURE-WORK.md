@@ -306,21 +306,7 @@ similar monorepo-split situation comes up again elsewhere.
 
 ### 7.2 CI
 
-Superseded by `docs/MIPs/MIP-0065-ci-cd-on-github-hosted-runners.md`, which replaces this section with `docs/CI-CD.md`.
-
-`.github/workflows/ci.yml` now runs one job (`build-test`) doing unscoped `sbt scalafmtCheckAll` /
-`sbt compile` / `sbt test` at the repo root: `.aggregate()` cascades these to all three modules
-(`core`/`local`/`cli`) by default, confirmed directly. (An earlier version of this repo,
-back when it also contained nf-organizer, split this into two per-module jobs for clearer CI
-reporting; with only one project in the repo now, that split no longer serves a purpose.)
-
-**`.github/workflows/marola-e2e.yml`**: a separate, actually-new workflow: `E2ESpec`'s two tests, on
-`workflow_dispatch` only (manual trigger from the Actions tab or `gh workflow run`), never on
-push/PR. Installs Ollama via its official install script and pulls `llama3.2:1b` (1.3GB, the same
-model `RUN-LOCALLY.md` recommends) so the run is genuinely free: no paid API, just CI minutes.
-The YAML was validated (parses correctly, the install script URL resolves to Ollama's real GitHub
-release asset) but **the workflow itself has not been run through an actual GitHub Actions
-execution**: that requires pushing it and triggering it for real, which wasn't done here.
+Superseded by MIP-0065; the workflows are described in `docs/3-Working-on-the-repo/CI-CD.md`.
 
 ### 7.3 Splitting marola *itself* into multiple sbt modules — DONE
 

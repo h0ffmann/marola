@@ -41,6 +41,7 @@ template pointer: `.claude/rules/docs.md`):
 | `docs/4-Research-and-plans/AGENT-FRAMEWORKS-SURVEY.md` | Multi-agent frameworks survey: Python ideas → Scala shapes, Pekko fit, reading list |
 | `docs/4-Research-and-plans/AGENT-STACK-SURVEY.md` | agent4s / llm4s / ADK mapped to the MIPs, how they compose, the project Q&A agent |
 | `docs/3-Working-on-the-repo/DEV-FLOW.md` | The loop end to end: idea → MIP → acceptance → tasks → stacked PRs (verified, costed) → review on request → merge/restack → Implemented; command reference |
+| `docs/3-Working-on-the-repo/CI-CD.md` | Every workflow: trigger, runner, what it gates or deploys, secrets, how to run it by hand; the self-hosted rule and the maintainer's manual settings (MIP-0065) |
 | `docs/3-Working-on-the-repo/ISSUE-FLOW.md` | The GitHub tracking standard in use: the object model, the three intake tiers, the Definition of Ready, and every `issues.sh`/`just` command (MIP-0063) |
 | `docs/3-Working-on-the-repo/AGENT-SKILLS.md` | Which agent skills to use in this repo: `mip` (plan), `mip-tasks` (tasks → stacked PRs, `scripts/stack.sh`), superpowers walkthrough, candidates to write |
 | `docs/benchmarks/` | Kept `just benchmark` runs: re-run and compare before changing prompt/corpus/embedder/model |
