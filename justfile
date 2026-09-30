@@ -78,11 +78,13 @@ quality-other:
     scripts/deps-merge.sh --self-test
     scripts/runner-preflight.sh --self-test
     scripts/gha-runner.sh --self-test
+    scripts/site-data-push.sh --self-test
     python3 scripts/lib/req_merge.py --self-test
     python3 scripts/lib/uses_merge.py --self-test
     scripts/mip-stack.sh --self-test
     scripts/docs-mip-stack.sh --self-test
     scripts/stack.sh --self-test
+    scripts/uprd.sh --self-test
     python3 scripts/lib/mip_index_merge.py --self-test
     python3 scripts/ocr-post.py --self-test
     python3 scripts/mip_graph.py --self-test
@@ -90,6 +92,8 @@ quality-other:
     scripts/mkdocs.sh --self-test
     python3 scripts/lib/tasks_issues.py --self-test
     python3 scripts/strip_external_scripts.py --self-test
+    python3 scripts/workflow_runners.py --self-test
+    python3 scripts/workflow_runners.py
     python3 scripts/mip_graph.py --check
     python3 finetune/train_lora.py --self-test
     python3 finetune/build_dataset.py --self-test

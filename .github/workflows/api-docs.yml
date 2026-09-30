@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ${{ vars.CI_RUNNER || 'self-hosted' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -50,13 +50,13 @@ jobs:
       - name: pdoc for the scripts
         run: |
           set -euo pipefail
-          pip install --quiet pdoc
           # Stdlib-only CLI scripts, not a library — the index page says so, per MIP-0044 §5.6.
           # All of finetune/, not just build_dataset.py: every script there keeps torch/peft/trl
           # behind lazy imports, so pdoc can import them without the ML stack installed (verified
           # — all six render). That discipline exists for --dry-run/--self-test; documenting them
           # is a second thing it buys.
-          pdoc -o out/docs/api/python scripts/*.py scripts/lib/*.py finetune/*.py || \
+          # pipx, not pip: the hosted image's system Python refuses `pip install` (PEP 668).
+          pipx run pdoc -o out/docs/api/python scripts/*.py scripts/lib/*.py finetune/*.py || \
             echo "pdoc produced nothing for some inputs — continuing with what it did produce"
 
       - name: strip third-party scripts so the docs keep script-src 'self'
@@ -67,6 +67,8 @@ jobs:
       # MIP-0064: this replaces build_docs_index.py, which published a page of links to GitHub
       # because docs/*.md could not be mirrored. The repo is public, so it can be.
       - name: mkdocs (material + kroki), with the API trees folded in
+        env:
+          CONTAINER_RUNTIME: docker
         run: |
           set -euo pipefail
           scripts/mkdocs.sh
@@ -113,5 +115,5 @@ jobs:
             exit 0
           fi
           git -C "$tmp" commit -qm "api docs from ${GITHUB_SHA::12}"
-          git -C "$tmp" push -q origin HEAD:site-data
+          scripts/site-data-push.sh "$tmp"
           echo "pushed docs/ to site-data"

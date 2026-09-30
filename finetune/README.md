@@ -97,7 +97,11 @@ that write-up explains is expected (nothing in tasks 2-5's training data targets
 discipline) and not evidence the recipe is broken, not a favorable number picked to declare
 success.
 
-## As an image: `ghcr.io/h0ffmann/marola:local` (MIP-0008)
+## As an image: `ghcr.io/marola-dev/marola:local` (MIP-0008)
+
+**Built with Llama.** `:local` redistributes Meta's Llama 3.2 weights under the [Llama 3.2
+Community License](https://www.llama.com/llama3_2/license/); the agreement and the Acceptable Use
+Policy ship inside the image (`ollama show marola-llama3.2 --license`).
 
 The Tier 1 model, versioned like the code. `Dockerfile.local` is Ollama with `marola-llama3.2`
 already created from this directory's `Modelfile`; `.github/workflows/docker-local.yml` builds it

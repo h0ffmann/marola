@@ -24,7 +24,7 @@ CI health is *step*-level, not job-level: ci.yml has three jobs but ~20 named st
 reports 8/8 rather than a misleading 8/20. `--exclude-job` drops the reporting job itself, whose
 steps are by definition still running while it asks.
 
-LOC is `cloc` (flake.nix ships it; ci.yml apt-installs it on the runner), counted over the four
+LOC is `cloc` (from `nix develop .#lint`, locally and in ci.yml), counted over the four
 Scala modules and the Python trees, code lines only — blanks and comments excluded by cloc, and
 `target/`, `__pycache__/`, virtualenvs and `node_modules/` excluded by path.
 
@@ -77,6 +77,7 @@ SELF_TEST_SCRIPTS = (
     "scripts/mip_graph.py",
     "scripts/lib/tasks_issues.py",
     "scripts/strip_external_scripts.py",
+    "scripts/workflow_runners.py",
     "scripts/analyze_training.py",
     "scripts/site_live_check.py",
 )
@@ -190,7 +191,7 @@ def cloc_code(paths: tuple[str, ...], language: str, root: Path) -> int:
     """Code lines of `language` under `paths`; a path that does not exist is simply skipped."""
     if not shutil.which("cloc"):
         raise SystemExit(
-            "repo_stats: `cloc` is not on PATH (nix develop has it; CI apt-installs it)"
+            "repo_stats: `cloc` is not on PATH (nix develop has it, and ci.yml takes it from nix develop .#lint)"
         )
     present = [p for p in paths if (root / p).exists()]
     if not present:
@@ -216,10 +217,9 @@ def cloc_code(paths: tuple[str, ...], language: str, root: Path) -> int:
 def coverage_exe(which=shutil.which, has_module=None) -> list[str]:
     """How to invoke coverage.py here, as an argv prefix.
 
-    Two shapes, because the two places this runs install it differently: nix's
-    `python3Packages.coverage` puts a wrapped `coverage` on PATH but *not* on this interpreter's
-    import path, while Ubuntu's `python3-coverage` (what ci.yml apt-installs, mirroring its `cloc`
-    step) does the opposite. Prefer the executable, fall back to `-m`, fail loudly if neither.
+    Two shapes: nix's `python3Packages.coverage` puts a wrapped `coverage` on PATH but *not* on
+    this interpreter's import path, while a pip or distro install does the opposite. Prefer the
+    executable, fall back to `-m`, fail loudly if neither.
     """
     if has_module is None:
 
@@ -233,8 +233,8 @@ def coverage_exe(which=shutil.which, has_module=None) -> list[str]:
     if has_module():
         return [sys.executable, "-m", "coverage"]
     raise SystemExit(
-        "repo_stats: coverage.py is not installed (nix develop has it; CI apt-installs "
-        "python3-coverage) — or pass --no-python-coverage"
+        "repo_stats: coverage.py is not installed (nix develop has it, and ci.yml takes it "
+        "from nix develop .#lint) — or pass --no-python-coverage"
     )
 
 

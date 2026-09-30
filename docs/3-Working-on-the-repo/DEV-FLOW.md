@@ -1,8 +1,16 @@
 # Development flow
 
-**Issue** → **MIP** (Draft) → **acceptance** → **task list** → **stacked PRs** (one per task,
-verified, costed) → **review, when asked** → merge bottom-up, restack → **finish**
-(MIP → Implemented).
+```mermaid
+flowchart TD
+  issue([Issue]) --> mip["MIP (Draft)"]
+  mip --> acceptance[acceptance]
+  acceptance --> tasks["task list"]
+  tasks --> prs["stacked PRs<br/>(one per task, verified, costed)"]
+  prs --> review["review, when asked"]
+  review --> merge["merge bottom-up, restack"]
+  merge --> finish["finish<br/>(MIP → Implemented)"]
+```
+
 This page is the one place the whole loop is written down; the pieces live in the `mip` and
 `mip-tasks` skills (`.claude/skills/`), `AGENTS.md` (the hard rules), `docs/3-Working-on-the-repo/AGENT-SKILLS.md`
 (which superpowers skill does what) and the scripts under `scripts/`.
@@ -50,6 +58,21 @@ commit), **Rejected** (keep the file; the reasoning is the value) or **Supersede
 "Implement MIP-NNNN" from the human counts as acceptance; the first task's commit flips the
 status to `Accepted` and links the tasks file.
 
+The status row's own lifecycle:
+
+```mermaid
+stateDiagram-v2
+  state "Superseded by MIP-NNNN" as Superseded
+  [*] --> Draft: opened as its own PR
+  Draft --> Accepted: acceptance decision
+  Draft --> Rejected: acceptance decision
+  Draft --> Superseded: acceptance decision
+  Accepted --> Implemented: last merge
+  Rejected --> [*]
+  Superseded --> [*]
+  Implemented --> [*]
+```
+
 ## 3. The task list
 
 `mip-tasks` step 1 (superpowers `writing-plans` is skipped: the MIP is the plan): read the MIP,
@@ -77,6 +100,22 @@ scripts/stack.sh start MIP-NNNN <k> <slug>        # branch mip-nnnn/k-slug off t
 just build && just test && just quality           # + a live check whenever a data path changed (superpowers verification-before-completion: evidence, then the claim)
 git commit                                         # message ends with Tested: and Cost: trailers (AGENTS.md) — the PR's Tested/Cost sections come from them
 just pr                                            # fills any missing trailer (just cost-fill), pushes, opens/updates the PR — scripts/stack.sh pr's base logic on a mip-NNNN/k-* branch
+```
+
+The git history this produces — two stacked tasks, squash-merged bottom-up, then restacked:
+
+```mermaid
+%%{init: {"themeVariables": {"git0": "#1ac5da", "git1": "#3ecf6e", "git2": "#f0a030", "git3": "#c678dd", "commitLabelColor": "#ffffff", "commitLabelBackground": "#082f45"}}}%%
+gitGraph
+  commit id: "main"
+  branch mip-nnnn/1
+  commit id: "task 1"
+  branch mip-nnnn/2
+  commit id: "task 2"
+  checkout main
+  commit id: "squash #1"
+  branch mip-nnnn/2-restacked
+  cherry-pick id: "task 2" tag: "restack (rebase --onto)"
 ```
 
 `just pr --dry-run` prints every step (the trailers `cost-fill` would add, the body `uprd` would
@@ -165,6 +204,11 @@ is green; MIP status right; `docs/4-Research-and-plans/FABLE_REVIEW.md` item clo
   when the merged branch is deleted; the commits still need a rebase:
   `scripts/stack.sh restack` on the next branch, or `just stack-sync MIP-NNNN` for the whole
   stack (it adopts the stack from GitHub first; `gh stack link` keeps no local state).
+- A task PR's body carries `Closes #N` for the issue its `MIP-NNNN.tasks.md` row links (`uprd.sh`
+  writes it, #512), so the merge into `main` closes the issue and the board moves it to Done.
+  Label a PR that delivers only part of its task `task-partial`: the line becomes `Part of #N` and
+  the issue stays open. A PR merged into another task branch closes nothing; GitHub honours the
+  keyword only on the default branch.
 - `scripts/stack.sh status` / `just stack-view` until every PR is merged.
 - Last merge: superpowers `finishing-a-development-branch`: full suite green, delete the task
   branches, flip the MIP to **Implemented** with the PR numbers and the summed Cost in its status
@@ -268,7 +312,43 @@ also `Bash(gh stack merge*)`/`Bash(gh stack unstack*)`/`Bash(gh stack delete*)`,
 flag. Merging is a human decision, on
 waking up, full stop.
 
-## 8. Command reference
+## 8. The docs site
+
+Everything under `docs/` is published at <https://marola.dev/docs/>, rendered and full-text
+searchable, by mkdocs-material with a self-hosted Kroki rendering the Mermaid fences to SVG
+(MIP-0064). The prose ships the same way the code does, so it carries the same gates.
+
+**Where a new doc goes.** One of the four audience directories. Their `1-`…`4-` prefixes exist
+only to order the sidebar: there is no `nav:` key, mkdocs builds the tree from the filenames, so
+adding a doc needs no edit to `mkdocs/mkdocs.yml`.
+
+| Directory | For |
+|---|---|
+| `docs/1-Using-marola/` | someone running marola |
+| `docs/2-Building-marola/` | someone reading or changing the code |
+| `docs/3-Working-on-the-repo/` | someone working the process — this file, `ISSUE-FLOW.md`, `AGENT-SKILLS.md` |
+| `docs/4-Research-and-plans/` | surveys, roadmaps, reviews: ideas, most of them not built |
+| `docs/MIPs/` | the proposals; no prefix — digits sort before letters, so it lands last on its own |
+
+Add its row to `docs/index.md` in the same change: that file is the site's landing page as well as
+the index of what inside each doc is MIP material. `docs/benchmarks/` and `docs/superpowers/` are
+`exclude_docs`'d — repo artefacts, not documentation — and are linked at GitHub when referenced.
+
+**Preview, and the gate.** `just docs-serve` serves the real build on
+<http://localhost:8001/docs/>; the docs are baked into the image, so a doc edit needs a restart,
+not a reload. `just docs` is the build alone, and it is `--strict`: one unresolved internal link
+anywhere in `docs/` turns it red. Links that leave `docs/` — `AGENTS.md`, `PHILOSOPHY.md`,
+`docs/benchmarks/` — are absolute GitHub URLs for exactly that reason. Both need a Docker or
+Podman daemon (MIP-0064 decision 4); neither is part of `just quality`, so a docs change is
+previewed by hand.
+
+**How it ships.** A push to `main` touching `docs/**` or `mkdocs/**` runs `api-docs.yml`: scaladoc
+and pdoc, then `scripts/mkdocs.sh`, then the API trees folded into the site under `api/`, then
+`strip_external_scripts.py --check` over the merged tree, then the whole thing pushed to the
+`site-data` branch. `site.yml` deploys from there. A docs-only edit therefore pays for the whole
+job, scaladoc included, and appears on marola.dev after the next site deploy rather than on merge.
+
+## 9. Command reference
 
 | Step | Command |
 |---|---|
@@ -286,6 +366,7 @@ waking up, full stop.
 | Before every push | `.githooks/pre-push` runs `just quality-other`, plus `just quality-scala` when Scala changed — automatic, `--no-verify` to bypass |
 | Statement coverage (aggregated core/local/cli) | `just coverage`; published to the README badge by ci.yml on pushes to `main` |
 | Live checks | `just run -- --brief`, `just e2e`; once MIP-0005 lands, `just site-build floripa && just site-serve` |
+| The docs site | `just docs` (strict build into `mkdocs/generated-docs`), `just docs-serve` (preview on `localhost:8001/docs/`) — both need a Docker or Podman daemon |
 | One PR, start to finish | `just pr` (`--dry-run` prints every step and the body, no push, no `gh`) — fills missing trailers, pushes, opens/updates the PR |
 | Fill missing trailers only | `just cost-fill` (`--dry-run` to preview) — adds a measured or `est.` `Cost:` and a `ci-only` `Tested:` to any commit missing one, dates preserved |
 | Diff-size Cost estimate | `scripts/cost-split.py --estimate [--verbose]` (whole branch), `--estimate-commit <sha>` (one commit) — used automatically by `cost-fill`/`uprd` when nothing was logged |

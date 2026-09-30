@@ -2,10 +2,10 @@
 # marola — MIP-0008 §5.1: one Dockerfile, several targets. `docker build --target <target> .`
 #
 #   builder  sbt cli/assembly on Temurin 25 → /marola.jar (never shipped)
-#   jvm      Temurin 25 JRE (alpine) + the jar — `docker run --rm ghcr.io/h0ffmann/marola:jvm --brief --lat … --lon …`
+#   jvm      Temurin 25 JRE (alpine) + the jar — `docker run --rm ghcr.io/marola-dev/marola:jvm --brief --lat … --lon …`
 #   dev      the literal `nix develop`, for people without Nix: `docker run -it … marola:dev` drops you in the dev shell
 #   native-build  GraalVM native-image over the same jar (never shipped)
-#   native   one static-ish binary on distroless — `docker run --rm ghcr.io/h0ffmann/marola:native --brief --lat … --lon …`
+#   native   one static-ish binary on distroless — `docker run --rm ghcr.io/marola-dev/marola:native --brief --lat … --lon …`
 #
 # Secrets are never copied: `.dockerignore` is an allowlist and `.env` is not on it.
 # Base images are literal tags, not ARGs: hadolint's DL3006 does not resolve an ARG default.
@@ -48,7 +48,7 @@ ENV JAVA_TOOL_OPTIONS="-XX:+UseSerialGC -XX:MaxRAMPercentage=75 -XX:TieredStopAt
 ENTRYPOINT ["java", "-jar", "/app/marola.jar"]
 CMD ["--brief"]
 # The MCP server is the other main class in the same jar (build.sbt):
-#   docker run --rm -i --entrypoint java ghcr.io/h0ffmann/marola:jvm -cp /app/marola.jar marola.agent.SwimConditionsMcpServer
+#   docker run --rm -i --entrypoint java ghcr.io/marola-dev/marola:jvm -cp /app/marola.jar marola.agent.SwimConditionsMcpServer
 
 # --- native-build ----------------------------------------------------------------------------
 # The same jar, compiled ahead of time. The arguments and reachability metadata come from the jar
@@ -56,16 +56,20 @@ CMD ["--brief"]
 # `sbt cli/nativeImage` uses, so the two builds cannot drift. amd64 only: native-image does not
 # cross-compile (MIP-0008.tasks.md decision 7). ~45 s and ~4 GB RSS on 32 cores; a few minutes on
 # a 4-vCPU runner.
-FROM ghcr.io/graalvm/native-image-community:25 AS native-build
+# Pinned: the floating `:25` moved to 25.0.2, which rejects a JVM launcher flag in `Args`.
+FROM ghcr.io/graalvm/native-image-community:25.0.2 AS native-build
 WORKDIR /build
 COPY --from=builder /marola.jar /build/marola.jar
 RUN native-image -jar /build/marola.jar -o /build/marola
 
 # --- native ----------------------------------------------------------------------------------
-# distroless base: glibc + CA certificates + tzdata, no shell, non-root — everything the binary
-# links against (ldd: libc, libdl, libpthread, librt) and nothing else.
+# distroless base: glibc + CA certificates + tzdata, no shell, non-root. GraalVM 25.0.2 links
+# libz dynamically and distroless has none, so it comes from the same Debian release.
+FROM debian:12.12-slim AS zlib
+
 FROM gcr.io/distroless/base-debian12:nonroot AS native
 WORKDIR /app
+COPY --from=zlib /usr/lib/x86_64-linux-gnu/libz.so.1 /usr/lib/x86_64-linux-gnu/libz.so.1
 COPY --from=native-build /build/marola /app/marola
 COPY --chown=nonroot:nonroot knowledge /app/knowledge
 COPY --chown=nonroot:nonroot site/areas.json site/board.schema.json /app/site/

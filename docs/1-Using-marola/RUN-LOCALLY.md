@@ -332,8 +332,8 @@ before that (MIP-0005 §8).
 
 ## 10. Docker only — no Nix, no sbt, no Ollama install (MIP-0008)
 
-**Published tags** (`ghcr.io/h0ffmann/marola:<tag>`; this repo is private, so pulling needs
-`docker login ghcr.io` first: a GitHub PAT with `read:packages`, or `gh auth token | docker login
+**Published tags** (`ghcr.io/marola-dev/marola:<tag>`; until the package is made public (MIP-0065 §4.3), pulling
+needs `docker login ghcr.io` first: a GitHub PAT with `read:packages`, or `gh auth token | docker login
 ghcr.io -u <user> --password-stdin`):
 
 | Tag | What it is | Built by | Platforms |
@@ -346,11 +346,14 @@ ghcr.io -u <user> --password-stdin`):
 | `local-<sha>` | one benchmark candidate, kept whether or not it was promoted | same | amd64 |
 | `dev` / `dev-<sha>` | the literal `nix develop` shell in a container, for reading/hacking without installing Nix | `docker.yml`, `workflow_dispatch` only | amd64 |
 
+**Built with Llama.** `:local` redistributes Meta's Llama 3.2 weights under the [Llama 3.2
+Community License](https://www.llama.com/llama3_2/license/); the agreement and the Acceptable Use
+Policy ship inside the image (`ollama show marola-llama3.2 --license`).
+
 The `-<sha>` tags accumulate on every qualifying push (`local-<sha>` even for rejected candidates,
-which bundle the ~2 GB Ollama model). `ghcr-retention.yml` prunes them weekly, keeping the last 10
-per target (5 for `local`) and never touching the moving tags above, which is what everything below
-and `docker-compose.yml`/`docker-smoke.yml` actually pull. `just gh-billing` shows current GHCR/Actions
-usage against the account's plan (this repo gets no public-repo free tier).
+which bundle the ~2 GB Ollama model) and nothing prunes them: a public package's storage is free
+(MIP-0065 §4.4). Everything below and `docker-compose.yml`/`docker-smoke.yml` pull the moving tags
+above. `just gh-billing` shows current GHCR/Actions usage against the account's plan.
 
 The same pipeline from a machine that has Docker and nothing else. `docker-compose.yml` runs the
 CLI image with an Ollama sidecar; the model is pulled once into a named volume:
@@ -366,7 +369,7 @@ the image; `MAROLA_LOCAL_LLM_MODEL=llama3.2:1b` picks the small model from §2. 
 against an Ollama already running on the host:
 
 ```bash
-docker run --rm --network host ghcr.io/h0ffmann/marola:jvm --summarize --lat -27.6733 --lon -48.47
+docker run --rm --network host ghcr.io/marola-dev/marola:jvm --summarize --lat -27.6733 --lon -48.47
 ```
 
 `:local` is `finetune/README.md`'s "As an image". `just docker-build` builds any target here and
@@ -377,7 +380,7 @@ Alpine, ~70 MB + the 55 MB jar), `native-build` → `native` (below), and `dev`:
 (`docker run -it marola:dev bash`). Lint: `just quality` runs hadolint on it (from the lint lab).
 
 **Native binary (GraalVM).** The same CLI compiled ahead of time: one 69 MB executable, no JVM,
-~75 MB of RSS, on a distroless image (`ghcr.io/h0ffmann/marola:native`, amd64). Everything
+~75 MB of RSS, on a distroless image (`ghcr.io/marola-dev/marola:native`, amd64). Everything
 `just run` does works, `--summarize` and the reviewer included (verified live 2026-09-05 with
 `llama3.2:1b`); the MCP server stays on the JVM image. Locally:
 

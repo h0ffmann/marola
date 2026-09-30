@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted — `Tasks: docs/MIPs/MIP-0064.tasks.md` |
+| **Status** | Implemented — PRs #459 (mkdocs-build) → #463 (strict-links) → #465 (api-docs-rewire) → #473 (docs grouped by audience, which revisited decision 1) → #475 (docs-live); tasks and v1 decisions: [`MIP-0064.tasks.md`](./MIP-0064.tasks.md). Verified live per §7.6 |
 | **Author** | Claude (Opus 5), with Bruno |
 | **Created** | 2026-09-28 |
 | **Phase** | 3 — extends `site.yml`'s already-live Pages deploy; no Phase 1 or Phase 2 prerequisite, no cloud spend |
@@ -13,7 +13,7 @@
 | **Depends on** | Nothing must merge first. It consumes `api-docs.yml`'s scaladoc/pdoc output and replaces `scripts/build_docs_index.py`, both from MIP-0044; that MIP is already implemented, so this is a rewiring, not a dependency. No Phase 1 gate, no paid resource, so `AGENTS.md`'s cost rule does not bite |
 | **Blocked by** | none |
 | **Risk** | The generated `mkdocs/docs/` copy step. Every build copies `../docs/` into a throwaway tree, so links that escape `docs/` (`../AGENTS.md`, `../PHILOSOPHY.md`) break silently unless `--strict` catches them — and `--strict` turning red on an unrelated doc edit is the failure that makes people bypass the docs build |
-| **Cost so far** | — |
+| **Cost so far** | ~$76.42 total — $0.58 for this document (#454) plus ~$75.84 across the implementation PRs: $11.80 (#459), $16.10 (#463), $17.90 (#465), $30.04 (#473), from their `Cost:` trailers; #475's own figure is in its commit |
 
 ## 1. Summary
 
@@ -233,7 +233,9 @@ and, after the pdoc step and before the strip/push steps:
     rm -rf out/docs && mv mkdocs/generated-docs out/docs
 ```
 
-The runners are self-hosted with Docker on the host (`AGENTS.md`, "Docker itself is the host's").
+The runners were self-hosted with Docker on the host (`AGENTS.md`, "Docker itself is the host's").
+**Superseded by MIP-0065:** every job here, `api-docs.yml` and `docs-build` included, now runs on
+`ubuntu-latest`, whose image ships Docker and Compose; the paragraph below is the self-hosted record.
 **Corrected during task 3:** this section originally said `docker-smoke.yml` already relies on
 that, and it does not — that workflow pins `runs-on: ubuntu-latest` precisely because it needs a
 daemon. Nothing in this repo had ever run a container on the self-hosted runner, so a reachable

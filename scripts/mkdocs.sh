@@ -25,9 +25,11 @@ project_name() {
 # when its daemon answers. An installed `docker` whose current context points at a dead endpoint is
 # the normal case on a machine that also runs podman, and picking it by binary alone fails late,
 # after the image build, with an error about the context rather than about the daemon.
+# CONTAINER_RUNTIME=docker pins one: GitHub's hosted image has a podman whose `info` answers but
+# no podman socket, so its compose provider fails to reach a daemon (MIP-0065).
 pick_runtime() {
   local rt
-  for rt in podman docker; do
+  for rt in ${CONTAINER_RUNTIME:-podman docker}; do
     command -v "$rt" >/dev/null 2>&1 && "$rt" info >/dev/null 2>&1 && { echo "$rt"; return 0; }
   done
   return 1
@@ -129,6 +131,8 @@ self_test() {
   stub="$(mktemp -d)"
   printf '#!/bin/sh\nexit 0\n' >"$stub/podman"; chmod +x "$stub/podman"
   ok "$(PATH="$stub" pick_runtime)" "podman" "a reachable podman is picked"
+  printf '#!/bin/sh\nexit 0\n' >"$stub/docker"; chmod +x "$stub/docker"
+  ok "$(CONTAINER_RUNTIME=docker PATH="$stub" pick_runtime)" "docker" "CONTAINER_RUNTIME=docker skips a live podman"
   printf '#!/bin/sh\nexit 1\n' >"$stub/podman"
   printf '#!/bin/sh\nexit 0\n' >"$stub/docker"; chmod +x "$stub/docker"
   ok "$(PATH="$stub" pick_runtime)" "docker" "a podman whose daemon does not answer is skipped for a live docker"
@@ -163,12 +167,63 @@ self_test() {
   ok "$(grep -c '^ *server_url:' "$cfg")" "1" "mkdocs.yml uses the 1.7.0 snake_case server_url"
   ok "$(grep -c 'http_method: POST' "$cfg")" "1" "http_method is POST, so SVGs are written into the output"
   ok "$(grep -c 'fence_prefix: ""' "$cfg")" "1" 'fence_prefix is empty, so plain mermaid fences render'
+  # MIP-0068 §5.2: each defaults the other way in the 1.7.0 plugin.
+  ok "$(grep -c '^ *fail_fast: true' "$cfg")" "1" "fail_fast is on, so a broken diagram fails the build"
+  ok "$(grep -c '^ *enable_bpmn: false' "$cfg")" "1" "bpmn is off, so its fence stays a code block"
+  ok "$(grep -c '^ *enable_diagramsnet: false' "$cfg")" "1" "diagramsnet stays off"
   ok "$(grep -c '^nav:' "$cfg")" "0" "there is no hand-written nav to drift (decision 1)"
   ok "$(grep -c '^ *- privacy' "$cfg")" "1" "the privacy plugin is on, so Material's webfont is served locally"
   ok "$(serve_path "$cfg")" "/docs/" "the serve banner follows site_url's path, which is where the dev server answers"
   ok "$(printf 'site_url: https://example.com\n' >"$tmpcfg"; serve_path "$tmpcfg")" "/" "a site_url with no path serves at the root"
   ok "$(grep -c '^strict: true' "$cfg")" "1" "the build is strict, so a broken internal link fails it"
   ok "$([ -f "$repo_root/docs/index.md" ] && echo yes || echo no)" "yes" "docs/index.md exists — strict does not check for it, and without it the site has no landing page"
+
+  # #511: mkdocs/hooks/mermaid_font.py runs before the kroki plugin (event_priority) and pins
+  # every top-level ```mermaid fence to a font Kroki actually has, so it never measures label
+  # width in a fallback the plugin's own styles injection cannot reach (_inject_mermaid ignores
+  # text.font-family). Exercised with plain python3, outside the container the hook normally
+  # runs in — the hook module guards its `mkdocs.plugins` import for exactly this reason.
+  ok "$(grep -c '^ *hooks:' "$cfg")" "1" "mkdocs.yml registers the hooks: key"
+  ok "$(grep -c 'hooks/mermaid_font.py' "$cfg")" "1" "...pointing at the font-pin hook"
+  tmp="$(mktemp -d)"
+  cat >"$tmp/sample.md" <<'SAMPLE'
+# Sample
+
+```mermaid
+flowchart TD
+  a --> b
+```
+
+````markdown
+```mermaid
+flowchart TD
+  a --> b
+```
+````
+
+```mermaid
+%%{init: {"themeVariables": {"git0": "#1ac5da"}}}%%
+gitGraph
+  commit
+```
+SAMPLE
+  out="$(python3 -c "
+import sys
+sys.path.insert(0, '$repo_root/mkdocs/hooks')
+import mermaid_font
+print(mermaid_font.pin_mermaid_font(open('$tmp/sample.md').read()), end='')
+")"
+  ok "$(printf '%s' "$out" | grep -c fontFamily)" "2" \
+     "a mermaid fence is given the pinned font (once per real fence, not the nested Source example)"
+  ok "$(printf '%s' "$out" | grep -c '^```$')" "3" \
+     "...and every fence's own closing delimiter survives the rewrite, not just its opening"
+  ok "$(printf '%s' "$out" | sed -n '/^```mermaid$/{n;p;}' | grep -c 'Open Sans')" "2" \
+     "the init line lands first, ahead of the diagram source"
+  ok "$(printf '%s' "$out" | grep -c '````markdown')" "1" \
+     "...but a mermaid fence nested inside a longer fence is left alone"
+  ok "$(printf '%s' "$out" | grep -c 'git0')" "1" \
+     "...and an existing fence-level init (gitGraph colours) still merges fine (MIP-0068 task 1, #510)"
+  rm -rf "$tmp"
 
   # --help slices the header by line number, which silently starts printing code when the header
   # grows or shrinks. It shrank once already, when task 2 deleted the not-strict-yet caveat.
