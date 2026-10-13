@@ -6,7 +6,7 @@ paths: ["docs/**"]
 
 ## MIPs (`docs/MIPs/`)
 
-Design a non-trivial change here first, via the `mip` skill (`.claude/skills/mip/SKILL.md`),
+Design a non-trivial change here first, via the `/marola-devkit:mip` skill (the marola-devkit plugin),
 before building it; see that skill for when a MIP is warranted, what to verify before writing
 one, and the required template sections.
 
@@ -21,7 +21,7 @@ one task has actually landed.
 
 A flow, lifecycle, schema or multi-actor exchange gets a rendered diagram, not an arrow chain in
 prose or box-drawing in a bare fence (MIP-0068; examples in
-`docs/3-Working-on-the-repo/DIAGRAMS.md`):
+`docs/3-Ways-of-working/DIAGRAMS.md`):
 
 | Picture | Fence |
 |---|---|
@@ -30,6 +30,9 @@ prose or box-drawing in a bare fence (MIP-0068; examples in
 | a schema from DDL | `dbml {bg-dark=white}` |
 | a chart from a results table | `vegalite {bg-dark=white}` |
 | a sketch or wireframe | `excalidraw {bg-dark=white}` with `@from_file:assets/diagrams/<name>.excalidraw` |
+
+A README diagram is the exception: GitHub renders no Kroki dialect, so it is a hand-written
+`docs/img/<name>.svg` (and `<name>.pt-BR.svg`), drawn with the `architecture-diagram` skill.
 
 Draw only what the prose beside it already says, and keep the prose: the text is the source of
 truth. Keep a diagram under about 15 nodes; split it rather than grow it. Plain ` ```mermaid `,
@@ -44,9 +47,22 @@ nothing for an author to add.
 
 ## Everything else under `docs/`
 
-`docs/index.md` indexes every doc and marks which ideas are MIP material; check it before
-assuming something is undecided or unbuilt. When something in a doc turns out to be wrong (an
-API/limit/version changes, a library moves past the version pinned in `build.sbt`, etc.),
-update it in the same change that discovers the problem: these are living reference docs, not a
-historical snapshot of what was true when they were written.
-</content>
+The site is built from every repo (`docs/3-Ways-of-working/DOCS-SITE.md`; MIP-0074):
+
+- **Landing**: a repo's `README.md` is its landing page (this repo's is the site's root). There
+  is no `docs/index.md` in any repo; the build refuses one.
+- **Links**: relative inside a repo, written to work on GitHub; absolute
+  `https://docs.marola.dev/…` across repos. A page that moves gets a `redirect_maps` entry in
+  `mkdocs/mkdocs.yml` in the same change.
+- **Skeleton**: in a code repo, numbered pages (`1-design`, `2-libraries`, `3-development`,
+  `4-reference`, split into `_` siblings) and `adr/`; using marola, anything spanning repos,
+  process, research and MIPs belong here.
+- **Recipes**: a doc names only its own repo's recipes and the devkit's; any other recipe carries
+  the checkout marker ("in a marola-<name> checkout" in the sentence, or a fence's first line
+  `# in a marola-<name> checkout`), which `docs-lint` reads.
+
+`docs/MIPs/CANDIDATES.md` marks which ideas are MIP material; check it before assuming something
+is undecided or unbuilt. When something in a doc turns out to be wrong (an API/limit/version
+changes, a pinned dependency or tool moves on, etc.), update it in the same change that discovers
+the problem: these are living reference docs, not a historical snapshot of what was true when
+they were written.

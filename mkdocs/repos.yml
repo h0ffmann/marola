@@ -1,0 +1,13 @@
+# repos.yml — the repos scripts/prepare-docs.sh mounts at 5-Repos/<name>/ (MIP-0074 §5.3), in this
+# order. Each is a submodule, except `source: flake-lock`: marola-devkit, fetched at flake.lock's
+# locked rev.
+
+- name: marola-site
+- name: marola-corpus
+- name: marola-ml
+- name: marola-app
+- name: marola-oods
+- name: marola-skills
+- name: marola-agents
+- name: marola-devkit
+  source: flake-lock

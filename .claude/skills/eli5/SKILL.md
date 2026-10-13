@@ -6,34 +6,38 @@ description: "Explain an ocean, marine-safety or marola-internals topic to someo
 # eli5
 
 Explain like the reader knows nothing about this topic: short sentences, one idea at a time, a
-picture before the prose. Adapted for this repository from the community `eli5` skill by Thariq
+picture before the prose. Adapted for marola from the community `eli5` skill by Thariq
 Shihipar (MIT, `anthropics/claude-plugins-community`), which produces an HTML picture explainer.
 
 Topic: $ARGUMENTS
 
-## Ground it in this repository first
+## Ground it in the checkout first
 
 marola tells people whether it is safe to swim, so an explanation that contradicts what the code
-actually does, or what the corpus actually says, is worse than no explanation. Before writing,
-read whichever of these covers the topic:
+actually does, or what the corpus actually says, is worse than no explanation. The paths below are
+from an umbrella checkout with its submodules initialised (`git submodule update --init`). Before
+writing, read whichever of these covers the topic:
 
 - **A sea topic** (waves, tides, rips, upwelling, jellyfish, water quality, whales) →
-  `knowledge/*.md`. This is marola's retrieval corpus: every file carries a `Source:` line, and
-  `--ask`/`ask_ocean_question` answer from it and nothing else. Explain what *this* corpus says,
-  in its terms, so the explanation and the bot agree.
-- **How marola works** → `docs/2-Building-marola/ARCHITECTURE.md`: §3 is what is actually built, §5 the six
-  pluggable integrations, §8 the honest limits of the jellyfish/whale heuristics, §11 the phases.
-  §3 and §9 mark what is verified live versus written-not-run; carry that distinction into the
-  explanation instead of flattening it.
+  `marola-corpus/knowledge/*.md`. This is marola's retrieval corpus: every file carries a
+  `Source:` line, and `--ask`/`ask_ocean_question` answer from it and nothing else. Explain what
+  *this* corpus says, in its terms, so the explanation and the bot agree.
+- **How marola works** → `docs/2-Building-marola/ARCHITECTURE.md` for the system across repos,
+  `marola-app/docs/1-design.md` for what is built, `marola-app/docs/1-design_integrations.md`
+  for the pluggable integrations, `docs/1-Using-marola/LIMITATIONS.md` for the honest limits
+  (the jellyfish/whale heuristics among them), `docs/PHASES.md` for the phases. Where a page marks
+  what is verified live versus written-not-run, carry that distinction into the explanation
+  instead of flattening it.
 - **Why it is shaped that way** → the MIP in `docs/MIPs/` (`docs/MIPs/README.md` indexes them with
-  status), `PHILOSOPHY.md` for the repo-wide choices, `AGENTS.md` for the rules.
-- **The code itself** → `core/src/main/scala/marola/...` for the real behaviour: `scoring/`,
-  `conditions/`, `beaches/`, `knowledge/`, `llm/`.
+  status), `docs/3-Ways-of-working/PHILOSOPHY.md` for the org-wide choices, `AGENTS.md` for the
+  rules.
+- **The code itself** → `marola-app/core/src/main/scala/marola/...` for the real behaviour:
+  `scoring/`, `conditions/`, `beaches/`, `knowledge/`, `llm/`.
 
-If the repository and your memory disagree, the repository wins. If neither covers it, say so
+If the checkout and your memory disagree, the checkout wins. If neither covers it, say so
 plainly rather than filling the gap with a plausible-sounding invention.
 
-Two traps specific to this repo: a MIP that is `Draft` or `Accepted` describes something **not
+A trap specific to marola: a MIP that is `Draft` or `Accepted` describes something **not
 built**: say "proposed in MIP-NNNN", never the present tense.
 
 ## How to explain
@@ -52,7 +56,7 @@ built**: say "proposed in MIP-NNNN", never the present tense.
 4. **Why it matters here.** One or two lines connecting it to what marola does: the swimability
    score, the hour it recommends, the safety footer, the local-first default.
 5. **Where to read more.** The corpus file and its `Source:` URL, the architecture section, or the
-   MIP: each one you actually opened. A claim you did not check against a file in this repo or a
+   MIP: each one you actually opened. A claim you did not check against a file in the checkout or a
    page you fetched gets marked as unverified, in the answer, in those words.
 
 ## Analogies
@@ -75,9 +79,10 @@ with the English term in brackets once so the reader can search for it.
 Rips, jellyfish stings, water quality and sea state are the topics most likely to be asked about,
 and an explanation of one is not a recommendation to act. Explain the mechanism; do not tell
 someone whether to get in the water, do not give first aid instructions beyond what the corpus
-states with its source, and keep the same hedges the corpus and `SafetyFooter` keep. If the
+states with its source, and keep the same hedges the corpus and `SafetyFooter`
+(`marola-app/core/src/main/scala/marola/knowledge/SafetyFooter.scala`) keep. If the
 question is really "is it safe tomorrow at X", that is what the pipeline answers: point at
-`just run` / the bot, not at a guess.
+marola-app's `just run` / the bot, not at a guess.
 
 ## Output
 
@@ -85,13 +90,14 @@ The default is a chat answer: short paragraphs and the diagram inline. If the us
 a slide, something printable or something to send to someone, write a standalone HTML file with
 large type and few words into `.tmp/eli5/<topic>.html` (`.tmp/` is gitignored) and give them the
 path. Do not add files anywhere else in the tree: a fact that belongs in the corpus goes through
-the `corpus-doc` skill (it needs a real fetched source), a design goes through `mip`, and neither
+marola-corpus's `corpus-doc` skill (it needs a real fetched source), a design goes through
+`/marola-devkit:mip`, and neither
 is this skill's job. This skill writes no commits and no PRs.
 
 ## Do not
 
 - Do not invent numbers. Temperatures, wave heights, distances, score weights, model names and
-  API limits come from a file in this repo or a page you fetched, or they are marked unverified.
+  API limits come from a file in the checkout or a page you fetched, or they are marked unverified.
 - Do not describe proposed work as built.
 - Do not explain by pasting code. A ten-line excerpt is fine when the code *is* the point; a file
   dump is not an explanation.

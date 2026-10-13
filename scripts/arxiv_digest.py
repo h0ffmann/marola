@@ -10,7 +10,7 @@ Queries the real arXiv API (export.arxiv.org/api/query, Atom XML) for oceanograp
 condition forecasting, jellyfish/marine-life prediction, and LLM-for-forecasting papers — the
 research surface behind marola's own heuristics (docs/2-Building-marola/ARCHITECTURE.md) and a feeder for MIP
 research (see MIP-0019). Caches the same way `MadsLorentzen/ai-job-search`'s job tracker does
-(surveyed in docs/3-Working-on-the-repo/SELF-DOCUMENTING.md): one flat JSON file per paper, keyed by arXiv id, so a
+(surveyed in docs/4-Research-and-plans/SELF-DOCUMENTING.md): one flat JSON file per paper, keyed by arXiv id, so a
 re-run never re-fetches or duplicates an already-seen paper, plus one flat JSONL index a human or
 another script can grep/tail without touching the per-paper files.
 
@@ -22,7 +22,7 @@ Cache layout, under .tmp/arxiv_cache/ (gitignored — fetched data, not source):
                                            relevance_score, fetched_at) — rewritten each run from
                                            the current papers/ contents, so it never drifts from them
 
-Network is stdlib-only (`urllib.request`), matching this repo's other scripts (cost-split.py).
+Network is stdlib-only (`urllib.request`).
 """
 
 import argparse

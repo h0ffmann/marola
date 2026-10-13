@@ -1,0 +1,24 @@
+[submodule "marola-site"]
+	path = marola-site
+	url = https://github.com/marola-dev/marola-site.git
+[submodule "marola-corpus"]
+	path = marola-corpus
+	url = https://github.com/marola-dev/marola-corpus.git
+[submodule "marola-ml"]
+	path = marola-ml
+	url = https://github.com/marola-dev/marola-ml.git
+[submodule "marola-app"]
+	path = marola-app
+	url = https://github.com/marola-dev/marola-app.git
+[submodule "marola-oods"]
+	path = marola-oods
+	url = https://github.com/marola-dev/marola-oods.git
+[submodule "marola-skills"]
+	path = marola-skills
+	url = https://github.com/marola-dev/marola-skills.git
+[submodule "marola-agents"]
+	path = marola-agents
+	url = https://github.com/marola-dev/marola-agents.git
+[submodule "marola-research"]
+	path = marola-research
+	url = https://github.com/marola-dev/marola-research.git

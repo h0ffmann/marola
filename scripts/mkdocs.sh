@@ -10,7 +10,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="marola/mkdocs"
 
 # Compose names its project after the directory it runs in, which is `mkdocs` in every checkout of
 # this repo. With fixed container_names on top of that, two builds on one host were the same stack:
@@ -19,6 +18,12 @@ image="marola/mkdocs"
 # checkout path makes the project unique; cksum keeps it short and shell-safe.
 project_name() {
   printf 'marola-mkdocs-%s' "$(printf '%s' "$1" | cksum | cut -d" " -f1)"
+}
+
+# The docs are baked into the image (stage_docs below), so a shared `marola/mkdocs` tag has the
+# same cross-checkout collision as the project name above (#526).
+image_tag() {
+  printf 'marola/mkdocs:%s' "$(printf '%s' "$1" | cksum | cut -d" " -f1)"
 }
 
 # Ported from the reference (MIP-0064 §4.1), including the part that matters: a runtime counts only
@@ -63,21 +68,40 @@ stage_docs() {
   cp -R "$src/." "$dest/"
 }
 
+# strict does not cover this: a tree with no index.md builds green with no landing page, which
+# reaches docs.marola.dev as a 404.
+check_index() {
+  [ -f "$1/index.md" ] || {
+    echo "mkdocs: $1 has no index.md — build it with scripts/prepare-docs.sh, which writes the umbrella README there" >&2
+    return 1
+  }
+}
+
 run() {
-  local mode="$1" rt files compose
+  local mode="$1" rt files compose image
   rt="$(pick_runtime)" || {
     echo "mkdocs: no reachable docker or podman daemon — a container runtime is this build's prerequisite" >&2
     exit 1
   }
   read -r -a files <<<"$(compose_files "$mode")"
   local project; project="$(project_name "$repo_root")"
+  image="$(image_tag "$repo_root")"
+  # Read by mkdocs/docker-compose.yml's `image:` line for every compose call below, not just build.
+  export MKDOCS_IMAGE="$image"
   compose=("$rt" compose -p "$project")
   export PODMAN_COMPOSE_WARNING_LOGS=false
 
+  # DOCS_SRC overrides what gets staged, relative to repo_root: docs.yml points this at the
+  # aggregated tree scripts/prepare-docs.sh builds (this repo's docs/ plus every submodule's), so
+  # the tracked docs/ tree itself is never written to (MIP-0070 §5.5, ruling T10-8).
+  local docs_src="$repo_root/docs"
+  [ -n "${DOCS_SRC:-}" ] && docs_src="$repo_root/$DOCS_SRC"
+
+  check_index "$docs_src"
   cd "$repo_root/mkdocs"
   "${compose[@]}" "${files[@]}" down >/dev/null 2>&1 || true
   rm -rf generated-docs
-  stage_docs "$repo_root/docs" docs
+  stage_docs "$docs_src" docs
   "$rt" build --tag "$image" --rm .
 
   # -d then `logs -f`, not a foreground `up`: podman-compose does not enforce depends_on health
@@ -112,10 +136,8 @@ run() {
   if [ "$mode" = build ]; then
     rm -rf docs generated-docs
     "$rt" cp "$cid:/mkdocs/generated-docs/" .
-    # strict mode does not cover this: a site with no index.md builds green and simply has no
-    # landing page, which reaches marola.dev/docs/ as a 404. Checked here instead.
     [ -f generated-docs/index.html ] || {
-      echo "mkdocs: built no generated-docs/index.html — docs/index.md is missing or was renamed" >&2
+      echo "mkdocs: built no generated-docs/index.html from $docs_src/index.md" >&2
       exit 1
     }
     echo "built: mkdocs/generated-docs/index.html"
@@ -146,6 +168,13 @@ self_test() {
      "two checkouts get different projects, so their stacks cannot collide"
   ok "$(project_name /a/b/c | grep -cE '^marola-mkdocs-[0-9]+$')" "1" "and it is a shell-safe compose project name"
 
+  ok "$(image_tag /a/b/c)" "$(image_tag /a/b/c)" "the image tag is stable for one checkout"
+  ok "$([ "$(image_tag /a/b/c)" = "$(image_tag /a/b/d)" ] && echo same || echo different)" "different" \
+     "two checkouts get different image tags, so a build in one cannot retag the other's image"
+  ok "$(image_tag /a/b/c | grep -cE '^marola/mkdocs:[0-9]+$')" "1" "and it is a well-formed image tag"
+  ok "$(grep -c 'image: \${MKDOCS_IMAGE:-marola/mkdocs}' "$repo_root/mkdocs/docker-compose.yml")" "1" \
+     "compose receives the per-checkout image via MKDOCS_IMAGE, defaulting to the shared tag"
+
   ok "$(compose_files build)" "-f docker-compose.yml -f docker-compose.build.yml" "build mode layers the build override"
   ok "$(compose_files serve)" "-f docker-compose.yml -f docker-compose.serve.yml" "serve mode layers the serve override"
   ok "$(compose_files nonsense || echo rejected)" "rejected" "an unknown mode is rejected, not silently built"
@@ -173,10 +202,21 @@ self_test() {
   ok "$(grep -c '^ *enable_diagramsnet: false' "$cfg")" "1" "diagramsnet stays off"
   ok "$(grep -c '^nav:' "$cfg")" "0" "there is no hand-written nav to drift (decision 1)"
   ok "$(grep -c '^ *- privacy' "$cfg")" "1" "the privacy plugin is on, so Material's webfont is served locally"
-  ok "$(serve_path "$cfg")" "/docs/" "the serve banner follows site_url's path, which is where the dev server answers"
+  ok "$(serve_path "$cfg")" "/" "docs.marola.dev serves at its root (MIP-0070 §5.5)"
+  ok "$(printf 'site_url: https://example.com/docs/\n' >"$tmpcfg"; serve_path "$tmpcfg")" "/docs/" "the serve banner follows site_url's path, which is where the dev server answers"
   ok "$(printf 'site_url: https://example.com\n' >"$tmpcfg"; serve_path "$tmpcfg")" "/" "a site_url with no path serves at the root"
   ok "$(grep -c '^strict: true' "$cfg")" "1" "the build is strict, so a broken internal link fails it"
-  ok "$([ -f "$repo_root/docs/index.md" ] && echo yes || echo no)" "yes" "docs/index.md exists — strict does not check for it, and without it the site has no landing page"
+  ok "$(grep -c '^  anchors: warn' "$cfg")" "1" "anchor checks warn, so under strict a dangling #anchor fails the build"
+  # MIP-0074 §5.3: the redirect machinery. scripts/docs_redirect_check.js tests the 404 page itself.
+  ok "$(grep -c '^  custom_dir: overrides' "$cfg")" "1" "the theme reads mkdocs/overrides, where the forwarding 404.html is"
+  ok "$(grep -c '^  - redirects:' "$cfg")" "1" "the redirects plugin is on, for single page moves"
+  ok "$(grep -c 'mkdocs-redirects==1.2.2' "$repo_root/mkdocs/Dockerfile")" "1" "and its package is pinned in the image"
+  tmp="$(mktemp -d)"
+  ok "$(check_index "$tmp" 2>/dev/null && echo pass || echo fail)" "fail" "a build dir with no index.md fails before mkdocs runs — strict does not check for it"
+  ok "$(check_index "$tmp" 2>&1 | grep -c 'prepare-docs.sh')" "1" "...pointing at prepare-docs, which writes it from the README"
+  echo "# landing" >"$tmp/index.md"
+  ok "$(check_index "$tmp" && echo pass || echo fail)" "pass" "...and one with index.md passes"
+  rm -rf "$tmp"
 
   # #511: mkdocs/hooks/mermaid_font.py runs before the kroki plugin (event_priority) and pins
   # every top-level ```mermaid fence to a font Kroki actually has, so it never measures label
