@@ -38,6 +38,11 @@ install-hooks: devkit-link
 log n="10" *args="":
     @git --no-pager log -n {{ n }} --abbrev-commit --decorate --date=relative --format='%C(yellow)%h%C(reset) %C(dim)%ad%C(reset) %C(blue)%an%C(reset) %s%C(auto)%d%C(reset)' {{ args }}
 
+# The umbrella's Codeberg mirror, run by hand (needs cargo): `just codeberg-mirror setup`, then
+# `check` and `push`. scripts/codeberg-mirror/README.md has the auth options.
+codeberg-mirror *args:
+    cargo run --quiet --release --manifest-path scripts/codeberg-mirror/Cargo.toml -- {{ args }}
+
 # ---------------------------------------------------------------------
 # Build / test / lint
 # ---------------------------------------------------------------------

@@ -1,0 +1,10 @@
+[package]
+name = "codeberg-mirror"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Push the marola umbrella's branches and tags from GitHub to its Codeberg mirror"
+license = "MIT"
+
+# std only: no crates to fetch, so it builds offline and has nothing to audit.
+[dependencies]
